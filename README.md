@@ -123,3 +123,17 @@ This repository follows standard Project Bluefin practices:
 - Follow GNOME Human Interface Guidelines (HIG) for tone and messaging: clear, direct, friendly, and jargon-free.
 - Clean teardown on `disable()` is mandatory (no leaked timers, monitors, or lingering DOM styles).
 - Follow pure `bootc` image-based lifecycle conventions.
+
+---
+
+## Agentic Factory Onboarding
+
+`bluefin-bling` operates under the Project Bluefin agentic factory model:
+- **Authoritative Agent Instructions:** [`AGENTS.md`](AGENTS.md)
+- **Skill Router:** [`docs/SKILL.md`](docs/SKILL.md)
+- **Skills Catalog:** [`docs/skills/`](docs/skills/)
+  - [`factory-onboarding.md`](docs/skills/factory-onboarding.md)
+  - [`skill-improvement.md`](docs/skills/skill-improvement.md)
+  - [`gnome-shell-extension-dev.md`](docs/skills/gnome-shell-extension-dev.md)
+  - [`quick-settings-integration.md`](docs/skills/quick-settings-integration.md)
+
