@@ -1,0 +1,6 @@
+{
+  "uuid": "power-status-color@local",
+  "name": "Power Status Color",
+  "description": "Visually modifies the Quick Settings power button based on pure bootc staged updates and system uptime",
+  "shell-version": ["45", "46", "47", "48", "49", "50"]
+}

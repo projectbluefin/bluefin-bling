@@ -1,0 +1,13 @@
+/* GNOME Shell Quick Settings Power Status Color styling */
+
+.power-status-overdue,
+.power-status-overdue StIcon,
+.power-status-overdue .icon-button {
+    color: #e01b24 !important;
+}
+
+.power-status-reboot,
+.power-status-reboot StIcon,
+.power-status-reboot .icon-button {
+    color: #f6d32d !important;
+}
