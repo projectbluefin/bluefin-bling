@@ -47,6 +47,7 @@ bluefin-bling/
 ├── docs/
 │   ├── SKILL.md               # Task → skill router
 │   └── skills/                # Authoritative operational knowledge
+├── tests/                     # Discovery-based validation suite (stdlib unittest)
 ├── README.md
 └── AGENTS.md
 ```
@@ -125,19 +126,25 @@ Stop and ask at these four gates. Never guess past them.
 
 ## Build and Validation
 
+Run the full validation suite. It discovers every folder under `extensions/`, so a
+new extension is covered without editing any list:
+
 ```bash
-# Validate JS syntax across extensions
-node --check extensions/power-status-color/extension.js
-node --check extensions/syncthing-toggle/extension.js
-node --check extensions/syncthing-toggle/toggle.js
-node --check extensions/syncthing-toggle/prefs.js
+python3 -m unittest discover -s tests -t tests -v
+```
 
-# Validate JSON metadata
-python3 -m json.tool extensions/power-status-color/metadata.json > /dev/null
-python3 -m json.tool extensions/syncthing-toggle/metadata.json > /dev/null
+Standard library only — no dependencies to install. It enforces `metadata.json`
+invariants (uuid ↔ folder name, shell-version, settings-schema), GSettings schema
+correctness (id ↔ metadata, path convention, no unknown or dead keys), `node --check`
+on every JS source, and `disable()` teardown hygiene. See
+[`docs/skills/extension-validation.md`](docs/skills/extension-validation.md).
 
+There is no CI gate yet — run the suite locally before every PR. Also compile the
+schemas:
+
+```bash
 # Compile and validate GSettings schemas
-glib-compile-schemas --strict extensions/syncthing-toggle/schemas/
+glib-compile-schemas --strict --dry-run extensions/syncthing-toggle/schemas/
 ```
 
 ---
