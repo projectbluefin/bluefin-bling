@@ -92,6 +92,10 @@ function runCommandAsync(argv, cancellable) {
    - Every `Gio.FileMonitor` signal must be disconnected with `monitor.disconnect(id)` and cancelled with `monitor.cancel()`.
 4. **Style Cleanup:**
    - Never leave custom CSS style classes on system widgets after deactivation. Clean up all added classes in `disable()`.
+5. **Dynamic Theme & Style Class Management:**
+   - Scope custom theme overrides under a top-level style class on `Main.uiGroup` (e.g. `Main.uiGroup.add_style_class_name('light-style-active')`).
+   - Listen to `changed::color-scheme` on `Gio.Settings({ schema_id: 'org.gnome.desktop.interface' })` and notify `St.Settings.get().notify('color-scheme')` after toggling `Main.sessionMode.colorScheme`.
+   - In `disable()`, synchronously disconnect the settings signal, remove the style class from `Main.uiGroup`, reset `Main.sessionMode.colorScheme = 'prefer-dark'`, and notify `St.Settings` to ensure zero style leakage.
 
 ---
 

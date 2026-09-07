@@ -1,0 +1,124 @@
+/* Light Style theme override for Top Bar, Dock, and App Grid */
+
+.light-style-active #panel {
+    background-color: rgba(255, 255, 255, 0.88) !important;
+    color: #2e3436 !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.light-style-active #panel .panel-button {
+    color: #2e3436 !important;
+    font-weight: 600;
+}
+
+.light-style-active #panel .panel-button StIcon,
+.light-style-active #panel .panel-button StLabel {
+    color: #2e3436 !important;
+}
+
+.light-style-active #panel .panel-button:hover,
+.light-style-active #panel .panel-button:active,
+.light-style-active #panel .panel-button:focus,
+.light-style-active #panel .panel-button:checked {
+    color: #000000 !important;
+    background-color: rgba(0, 0, 0, 0.08) !important;
+}
+
+.light-style-active #panel .panel-button:hover StIcon,
+.light-style-active #panel .panel-button:hover StLabel,
+.light-style-active #panel .panel-button:active StIcon,
+.light-style-active #panel .panel-button:active StLabel {
+    color: #000000 !important;
+}
+
+/* Dock (Dash to Dock & native dash) */
+.light-style-active #dashtodockContainer.bottom #dash .dash-background,
+.light-style-active #dashtodockContainer.top #dash .dash-background,
+.light-style-active #dashtodockContainer.left #dash .dash-background,
+.light-style-active #dashtodockContainer.right #dash .dash-background,
+.light-style-active #dashtodockContainer #dash .dash-background,
+.light-style-active #dashtodockContainer .dash-background,
+.light-style-active .dash-background {
+    background-color: rgba(255, 255, 255, 0.92) !important;
+    border: 1px solid rgba(0, 0, 0, 0.08) !important;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12) !important;
+}
+
+.light-style-active #dashtodockContainer #dash .dash-separator {
+    background-color: rgba(0, 0, 0, 0.15) !important;
+}
+
+.light-style-active #dashtodockContainer #dash .app-grid-running-dot {
+    background-color: #3584e4 !important;
+}
+
+/* Show Apps Button icon in Dock */
+.light-style-active #dashtodockContainer #dash #show-apps StIcon,
+.light-style-active #dashtodockContainer #dash .show-apps-icon,
+.light-style-active #dashtodockContainer .show-apps-icon,
+.light-style-active #dash #show-apps StIcon,
+.light-style-active #dash .show-apps-icon,
+.light-style-active .show-apps-icon,
+.light-style-active .show-apps StIcon {
+    color: #2e3436 !important;
+}
+
+.light-style-active #dashtodockContainer #dash #show-apps:hover StIcon,
+.light-style-active #dash #show-apps:hover StIcon,
+.light-style-active .show-apps:hover StIcon {
+    color: #000000 !important;
+}
+
+/* Show Apps Grid & Overview in light mode */
+.light-style-active #overviewGroup,
+.light-style-active .controls-manager {
+    background-color: rgba(246, 246, 248, 0.95) !important;
+}
+
+.light-style-active .icon-grid .overview-tile .overview-icon,
+.light-style-active .app-well-app .overview-icon,
+.light-style-active .grid-search-result .overview-icon {
+    color: #242424 !important;
+}
+
+.light-style-active .overview-tile StLabel,
+.light-style-active .app-well-app StLabel,
+.light-style-active .grid-search-result StLabel,
+.light-style-active .app-folder-dialog StLabel {
+    color: #242424 !important;
+    text-shadow: none !important;
+}
+
+.light-style-active .search-entry {
+    background-color: #ffffff !important;
+    color: #242424 !important;
+    border: 1px solid rgba(0, 0, 0, 0.15) !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08) !important;
+}
+
+.light-style-active .search-entry .search-entry-icon {
+    color: rgba(0, 0, 0, 0.6) !important;
+}
+
+.light-style-active .app-folder-dialog {
+    background-color: #ffffff !important;
+    color: #242424 !important;
+    border: 1px solid rgba(0, 0, 0, 0.12) !important;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15) !important;
+}
+
+.light-style-active .app-folder-dialog .folder-name-entry {
+    color: #242424 !important;
+}
+
+.light-style-active .app-folder {
+    background-color: rgba(0, 0, 0, 0.06) !important;
+}
+
+.light-style-active .page-indicator .page-indicator-icon {
+    background-color: rgba(0, 0, 0, 0.3) !important;
+}
+
+.light-style-active .page-indicator.active .page-indicator-icon {
+    background-color: #3584e4 !important;
+}

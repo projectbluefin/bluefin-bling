@@ -1,0 +1,15 @@
+{
+  "uuid": "light-style@projectbluefin.io",
+  "name": "Light Style",
+  "description": "Adaptive light/dark style theming for top bar, dock, and app grid",
+  "shell-version": [
+    "45",
+    "46",
+    "47",
+    "48",
+    "49",
+    "50"
+  ],
+  "url": "https://github.com/projectbluefin/bluefin-bling",
+  "version": 1
+}
