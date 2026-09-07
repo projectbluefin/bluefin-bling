@@ -5,7 +5,6 @@ import {
 	QuickMenuToggle,
 	SystemIndicator,
 } from 'resource:///org/gnome/shell/ui/quickSettings.js'
-import { spawnCommandLine } from 'resource:///org/gnome/shell/misc/util.js'
 import * as Main from 'resource:///org/gnome/shell/ui/main.js'
 import { gettext as _ } from 'resource:///org/gnome/shell/extensions/extension.js'
 
@@ -81,21 +80,40 @@ export var ServiceIndicator = GObject.registerClass(
 
 				Main.notify(title, body)
 
-				let cmdline = `systemctl --user  ${
-					!isEnabled ? 'stop' : 'start'
-				} ${this._settings.get_string('service-name')}`
-				spawnCommandLine(cmdline)
+				const serviceName = this._validatedServiceName()
+				if (!serviceName)
+					return
+
+				this._runSystemctl(!isEnabled ? 'stop' : 'start', serviceName)
 				await this.checkStatus()
 
 				// if the appropriate setting is enabled (default, also enable or disable the service)
 				// not using enable --now because it's way slower and bugs the status.
-				if (!this._settings.get_boolean('start-stop-only')) {
-					cmdline = `systemctl --user  ${
-						!isEnabled ? 'disable' : 'enable'
-					} ${this._settings.get_string('service-name')}`
-					spawnCommandLine(cmdline)
-				}
+				if (!this._settings.get_boolean('start-stop-only'))
+					this._runSystemctl(!isEnabled ? 'disable' : 'enable', serviceName)
 			})
+		}
+
+		// The service-name setting is free text (dconf-writable by any
+		// same-uid process). Never interpolate it into a command line:
+		// validate unit-name syntax and pass it as a discrete argv entry.
+		_validatedServiceName() {
+			const name = this._settings.get_string('service-name')
+			if (/^[a-zA-Z0-9_.:@-]+\.service$/.test(name))
+				return name
+			console.error(`[SyncthingToggle] Rejecting invalid service-name: ${name}`)
+			return null
+		}
+
+		_runSystemctl(verb, serviceName) {
+			try {
+				Gio.Subprocess.new(
+					['systemctl', '--user', verb, serviceName],
+					Gio.SubprocessFlags.NONE
+				)
+			} catch (e) {
+				logError(e, `Failed to run systemctl ${verb}`)
+			}
 		}
 
 		async checkStatus() {
