@@ -2,15 +2,37 @@
 
 Desktop enhancements, GNOME Shell extensions, and UI bling for [Project Bluefin](https://projectbluefin.io).
 
-This repository maintains extensions and visual integrations tailored for Bluefin systems, built around pure `bootc` conventions and modern GNOME Shell releases.
+This monorepo maintains extensions and visual integrations tailored for Bluefin systems, built around pure `bootc` conventions and modern GNOME Shell releases.
+
+---
+
+## Repository Structure
+
+```
+bluefin-bling/
+├── extensions/
+│   ├── power-status-color/    # Quick Settings power button status styling
+│   │   ├── metadata.json
+│   │   ├── extension.js
+│   │   └── stylesheet.css
+│   └── syncthing-toggle/      # Sync Folder peer sharing quick settings toggle
+│       ├── metadata.json
+│       ├── extension.js
+│       ├── toggle.js
+│       ├── prefs.js
+│       ├── icons/
+│       └── schemas/
+├── README.md
+└── .gitignore
+```
 
 ---
 
 ## Extensions
 
-### `power-status-color` (Quick Settings Power Status Alert)
+### 1. `power-status-color` (Quick Settings Power Status Alert)
 
-**UUID:** `power-status-color@local`  
+**UUID:** `power-status-color@projectbluefin.io`  
 **Compatibility:** GNOME Shell 45, 46, 47, 48, 49, 50+
 
 Visually alters the Quick Settings power button color to indicate system reboot and maintenance state:
@@ -26,34 +48,55 @@ Visually alters the Quick Settings power button color to indicate system reboot 
 - **Event-Driven & Polling:** Watches `/run` via `Gio.FileMonitor` for instant reaction to reboot flags, paired with a low-overhead 5-minute background timer for uptime and staged update checks.
 - **Lifecycle Hygiene:** Gracefully cancels in-flight subprocesses (`Gio.Subprocess.force_exit`), disconnects file monitors, clears `GLib.Source` timeouts, and removes custom CSS classes upon disable.
 
+### 2. `syncthing-toggle` (Sync Folder Peer Sharing Toggle)
+
+**UUID:** `syncthing-toggle@projectbluefin.io`  
+**Compatibility:** GNOME Shell 45, 46, 47, 48, 49, 50+
+
+A Quick Settings toggle for Bluefin's built-in Sync Folder peer sharing service:
+
+- **Quick Toggle:** Turn peer file sharing on or off with a single click.
+- **Desktop Notifications:** GNOME HIG-aligned notifications keep you informed without jargon:
+  - **Enabled:** *"Sync Folder Sharing Enabled — Your files are sharing with your other devices."*
+  - **Disabled:** *"Sync Folder Sharing Disabled — File sharing is paused."*
+- **Submenu Actions:** Quick link to open the Syncthing Web GUI directly in the default browser.
+
 ---
 
 ## Installation & Development
 
 ### Local Installation
 
-Install the extension directly into your user's GNOME Shell extension directory:
+Install an extension directly into your user's GNOME Shell extension directory:
 
+#### Install Power Status Color
 ```bash
-mkdir -p ~/.local/share/gnome-shell/extensions/power-status-color@local
-cp metadata.json extension.js stylesheet.css ~/.local/share/gnome-shell/extensions/power-status-color@local/
+mkdir -p ~/.local/share/gnome-shell/extensions/power-status-color@projectbluefin.io
+cp -r extensions/power-status-color/* ~/.local/share/gnome-shell/extensions/power-status-color@projectbluefin.io/
 ```
 
-### Enable Extension
+#### Install Sync Folder Toggle
+```bash
+mkdir -p ~/.local/share/gnome-shell/extensions/syncthing-toggle@projectbluefin.io
+cp -r extensions/syncthing-toggle/* ~/.local/share/gnome-shell/extensions/syncthing-toggle@projectbluefin.io/
+glib-compile-schemas ~/.local/share/gnome-shell/extensions/syncthing-toggle@projectbluefin.io/schemas/
+```
 
-On Wayland (default in Bluefin), log out and back in or reload extensions:
+### Enable Extensions
 
 ```bash
-gnome-extensions enable power-status-color@local
+gnome-extensions enable power-status-color@projectbluefin.io
+gnome-extensions enable syncthing-toggle@projectbluefin.io
 ```
 
 Check status:
 
 ```bash
-gnome-extensions info power-status-color@local
+gnome-extensions info power-status-color@projectbluefin.io
+gnome-extensions info syncthing-toggle@projectbluefin.io
 ```
 
-### Testing Alert States
+### Testing Alert States (`power-status-color`)
 
 #### 1. Reboot Required (Yellow)
 Create a temporary flag file:
@@ -68,7 +111,7 @@ sudo rm -f /run/reboot-required
 ```
 
 #### 2. Uptime Overdue (Red)
-To simulate 30+ days uptime without waiting, temporarily set `UPTIME_THRESHOLD_SECONDS = 60` in `extension.js`, restart or re-enable the extension, and observe the red icon.
+To simulate 30+ days uptime without waiting, temporarily set `UPTIME_THRESHOLD_SECONDS = 60` in `extensions/power-status-color/extension.js`, restart or re-enable the extension, and observe the red icon.
 
 ---
 
@@ -77,5 +120,6 @@ To simulate 30+ days uptime without waiting, temporarily set `UPTIME_THRESHOLD_S
 This repository follows standard Project Bluefin practices:
 - Target modern GNOME Shell (45+ ESM).
 - Prefer native platform features and standard library (`Gio`, `GLib`, `St`, `Clutter`).
+- Follow GNOME Human Interface Guidelines (HIG) for tone and messaging: clear, direct, friendly, and jargon-free.
 - Clean teardown on `disable()` is mandatory (no leaked timers, monitors, or lingering DOM styles).
 - Follow pure `bootc` image-based lifecycle conventions.

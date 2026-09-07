@@ -1,0 +1,16 @@
+{
+  "uuid": "syncthing-toggle@projectbluefin.io",
+  "name": "Sync Folder Toggle",
+  "description": "Quick settings toggle for Bluefin Sync Folder peer sharing",
+  "settings-schema": "org.gnome.shell.extensions.syncthing-toggle",
+  "shell-version": [
+    "45",
+    "46",
+    "47",
+    "48",
+    "49",
+    "50"
+  ],
+  "url": "https://github.com/projectbluefin/bluefin-bling",
+  "version": 1
+}
