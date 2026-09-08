@@ -53,7 +53,11 @@ Visually alters the Quick Settings power button color to indicate system reboot 
 **UUID:** `syncthing-toggle@projectbluefin.io`  
 **Compatibility:** GNOME Shell 45, 46, 47, 48, 49, 50+
 
-A Quick Settings toggle for Bluefin's built-in Sync Folder peer sharing service:
+A Quick Settings toggle for Bluefin's built-in Sync Folder peer sharing service. This is just a quadlet that runs the headless official syncthing container:
+
+> EZ
+>
+> -- John Bazzite
 
 - **Quick Toggle:** Turn peer file sharing on or off with a single click.
 - **Desktop Notifications:** GNOME HIG-aligned notifications keep you informed without jargon:
