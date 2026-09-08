@@ -84,13 +84,13 @@ export var ServiceIndicator = GObject.registerClass(
 				if (!serviceName)
 					return
 
-				this._runSystemctl(!isEnabled ? 'stop' : 'start', serviceName)
+				await this._runSystemctl(!isEnabled ? 'stop' : 'start', serviceName)
 				await this.checkStatus()
 
 				// if the appropriate setting is enabled (default, also enable or disable the service)
 				// not using enable --now because it's way slower and bugs the status.
 				if (!this._settings.get_boolean('start-stop-only'))
-					this._runSystemctl(!isEnabled ? 'disable' : 'enable', serviceName)
+					await this._runSystemctl(!isEnabled ? 'disable' : 'enable', serviceName)
 			})
 		}
 
@@ -105,12 +105,22 @@ export var ServiceIndicator = GObject.registerClass(
 			return null
 		}
 
-		_runSystemctl(verb, serviceName) {
+		async _runSystemctl(verb, serviceName) {
 			try {
-				Gio.Subprocess.new(
+				const proc = Gio.Subprocess.new(
 					['systemctl', '--user', verb, serviceName],
 					Gio.SubprocessFlags.NONE
 				)
+				await new Promise((resolve, reject) => {
+					proc.wait_check_async(null, (proc, res) => {
+						try {
+							proc.wait_check_finish(res)
+							resolve()
+						} catch (e) {
+							reject(e)
+						}
+					})
+				})
 			} catch (e) {
 				logError(e, `Failed to run systemctl ${verb}`)
 			}
