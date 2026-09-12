@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 
 from extension_manifest import (
     extension_dirs,
+    port_adjustment_bounds,
     js_sources,
     load_metadata,
     parse_schemas,
@@ -150,6 +151,68 @@ class TestSchemaUsageMatchesSources(unittest.TestCase):
                         f"{ext_dir.name}: schema key {key!r} is never read or bound by any "
                         "JS source — dead setting, remove it or wire it up"
                     )
+
+
+class TestPortRangeConsistency(unittest.TestCase):
+    """The port SpinButton range must match the gschema <range>.
+
+    prefs.js binds the port Gtk.SpinButton straight to the ``port`` GSettings
+    key, so the Gtk.Adjustment bounds and the gschema <range> must agree: the
+    UI may not offer a value the schema rejects, or the bound write fails
+    silently and the setting keeps its old value with no error surfaced.
+    """
+
+    _SYNCTHING_DIR = None
+
+    @classmethod
+    def setUpClass(cls):
+        for ext_dir in extension_dirs():
+            if ext_dir.name == "syncthing-toggle":
+                cls._SYNCTHING_DIR = ext_dir
+                return
+        cls._SYNCTHING_DIR = None
+
+    def _port_range(self):
+        for schema_file in schema_files(self._SYNCTHING_DIR):
+            for schema in parse_schemas(schema_file):
+                for key in schema.findall("key"):
+                    if key.get("name") == "port":
+                        rng = key.find("range")
+                        self.assertIsNotNone(
+                            rng,
+                            f"{self._SYNCTHING_DIR.name}: port key has no <range>",
+                        )
+                        return int(rng.get("min")), int(rng.get("max"))
+        self.fail(f"{self._SYNCTHING_DIR.name}: no port key found in schema")
+
+    def _adjustment_bounds(self):
+        prefs = self._SYNCTHING_DIR / "prefs.js"
+        source = prefs.read_text(encoding="utf-8")
+        try:
+            return port_adjustment_bounds(source)
+        except ValueError as exc:
+            self.fail(f"{self._SYNCTHING_DIR.name}/prefs.js: {exc}")
+
+    def test_port_schema_range_matches_adjustment_bounds(self):
+        if self._SYNCTHING_DIR is None:
+            self.skipTest("syncthing-toggle extension not present")
+        schema_min, schema_max = self._port_range()
+        lower, upper = self._adjustment_bounds()
+        with self.subTest("min==lower"):
+            self.assertEqual(
+                schema_min,
+                lower,
+                f"port schema min {schema_min} differs from Gtk.Adjustment lower "
+                f"{lower}; the UI can offer a value the schema rejects "
+                "(silent, unreported write failure)",
+            )
+        with self.subTest("max==upper"):
+            self.assertEqual(
+                schema_max,
+                upper,
+                f"port schema max {schema_max} differs from Gtk.Adjustment upper "
+                f"{upper}",
+            )
 
 
 if __name__ == "__main__":
