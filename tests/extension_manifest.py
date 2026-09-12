@@ -73,3 +73,33 @@ def referenced_settings_keys(source: str) -> set[str]:
     keys = {m.group("key") for m in _SETTINGS_ACCESS_RE.finditer(source)}
     keys |= {m.group("key") for m in _SETTINGS_BIND_RE.finditer(source)}
     return keys
+
+
+# The syncthing-toggle prefs.js binds the port Gtk.SpinButton straight to the
+# port GSettings key, so the Gtk.Adjustment bounds and the gschema <range> must
+# agree: anything the UI offers that the schema rejects is a silent write
+# failure. These two regexes read the adjustment bounds back out of prefs.js so
+# the test suite can compare them against the schema.
+_PORT_ADJUSTMENT_RE = re.compile(
+    r"new\s+Gtk\.Adjustment\s*\(\s*\{(?P<body>.*?)\}\s*\)",
+    re.DOTALL,
+)
+_ADJUSTMENT_BOUNDS_RE = re.compile(r"\b(lower|upper)\b\s*:\s*(\d+)\s*,?")
+
+
+def port_adjustment_bounds(prefs_source: str) -> tuple[int, int]:
+    """Return the (lower, upper) bounds of the Gtk.Adjustment in a prefs.js.
+
+    Raises ValueError if there is no Gtk.Adjustment or it is missing either
+    bound, so callers can assert the two agree with the gschema <range>.
+    """
+    match = _PORT_ADJUSTMENT_RE.search(prefs_source)
+    if match is None:
+        raise ValueError("no Gtk.Adjustment found")
+    bounds = {
+        kind: int(value)
+        for kind, value in _ADJUSTMENT_BOUNDS_RE.findall(match.group("body"))
+    }
+    if "lower" not in bounds or "upper" not in bounds:
+        raise ValueError(f"Gtk.Adjustment missing a bound: {bounds}")
+    return bounds["lower"], bounds["upper"]

@@ -4,3 +4,6 @@
 *~
 *.swp
 *.bak
+__pycache__/
+*.py[cod]
+gschemas.compiled

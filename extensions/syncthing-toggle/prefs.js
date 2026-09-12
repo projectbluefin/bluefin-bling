@@ -60,7 +60,7 @@ export default class SyncthingToggleExtensionPreferences extends ExtensionPrefer
 			orientation: Gtk.Orientation.HORIZONTAL,
 			numeric: true,
 			adjustment: new Gtk.Adjustment({
-				lower: 0,
+				lower: 1,
 				upper: 65535,
 				step_increment: 1,
 				value: port,
