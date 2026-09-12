@@ -1,60 +1,61 @@
-name: CI
+name: ci
 
+# Enforces the validation contract that docs/skills/extension-validation.md and
+# AGENTS.md describe but previously left to run by hand. Without this, a PR could
+# merge with failing tests, malformed metadata.json, undeclared GSettings keys, or
+# non-ESM sources and GNOME Shell would only refuse to load it at runtime.
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  validate:
-    name: Extension Validation Suite
+  extension-validation:
+    name: validate extensions (tests, node --check, glib-compile-schemas)
     runs-on: ubuntu-latest
     permissions:
       contents: read
-
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Set up Node.js
+      # The unittest suite runs `node --check` over every JS source and skips the
+      # check only when node is absent. Set up node so the gate actually runs.
+      - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: "22"
 
-      - name: Install GLib schema compiler
+      # glib-compile-schemas ships in libglib2.0-bin, not the base image.
+      - name: Install glib-compile-schemas
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libglib2.0-bin
 
-      - name: Run discovery test suite
+      # stdlib unittest only — no dependencies. Covers metadata.json, GSettings
+      # schema/source cross-checks, ESM-only sources, and teardown hygiene.
+      - name: Run validation suite
         run: python3 -m unittest discover -s tests -t tests -v
 
-      - name: Check JavaScript syntax
-        run: find extensions -name "*.js" -exec node --check {} +
-
-      - name: Compile GSettings schemas (strict dry-run)
+      # Compile every extension's schemas strictly. The suite already checks that
+      # schema keys are used by sources; this catches real compile errors.
+      - name: Compile GSettings schemas strictly
         run: |
           shopt -s nullglob
-          schemas=(extensions/*/schemas/)
-          if [ ${#schemas[@]} -eq 0 ]; then
-            echo "No extension schemas found to compile."
-          else
-            for dir in "${schemas[@]}"; do
-              echo "Validating schema compilation in $dir"
-              glib-compile-schemas --strict --dry-run "$dir"
-            done
+          found=0
+          for dir in extensions/*/schemas/; do
+            found=1
+            echo "::group::glib-compile-schemas --strict $dir"
+            glib-compile-schemas --strict --dry-run "$dir"
+            echo "::endgroup::"
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "no extension ships schemas/; nothing to compile"
           fi
