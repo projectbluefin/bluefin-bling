@@ -11,6 +11,11 @@ This monorepo maintains extensions and visual integrations tailored for Bluefin 
 ```
 bluefin-bling/
 ├── extensions/
+│   ├── light-style/           # Adaptive light/dark style theming for panel, dock, app grid
+│   │   ├── metadata.json
+│   │   ├── extension.js
+│   │   ├── stylesheet.css
+│   │   └── COPYING
 │   ├── power-status-color/    # Quick Settings power button status styling
 │   │   ├── metadata.json
 │   │   ├── extension.js
@@ -65,6 +70,19 @@ A Quick Settings toggle for Bluefin's built-in Sync Folder peer sharing service.
   - **Disabled:** *"Sync Folder Sharing Disabled — File sharing is paused."*
 - **Submenu Actions:** Quick link to open the Syncthing Web GUI directly in the default browser.
 
+### 3. `light-style` (Adaptive Light Style Theming)
+
+**UUID:** `light-style@projectbluefin.io`  
+**Compatibility:** GNOME Shell 45, 46, 47, 48, 49, 50+
+
+Adaptive runtime theming for top bar, dock, and app grid that coordinates with GNOME's Dark/Light style:
+
+- **Dynamic Theme Tracking:** Listens to `org.gnome.desktop.interface color-scheme` signal and applies styles instantly without restarting GNOME Shell.
+- **Top Bar (`#panel`):** Polished light palette (`rgba(255, 255, 255, 0.88)`) with dark text/icons (`#2e3436`) in light mode.
+- **Dock & Show Apps:** Styled dock container and dark symbolic styling for the show apps grid button.
+- **Overview & App Grid:** Light background with crisp typography and search entry styling.
+- **Synchronous Cleanup:** Removes `.light-style-active` from `Main.uiGroup` and restores session mode palette cleanly upon disable.
+
 ---
 
 ## Installation & Development
@@ -72,6 +90,12 @@ A Quick Settings toggle for Bluefin's built-in Sync Folder peer sharing service.
 ### Local Installation
 
 Install an extension directly into your user's GNOME Shell extension directory:
+
+#### Install Light Style
+```bash
+mkdir -p ~/.local/share/gnome-shell/extensions/light-style@projectbluefin.io
+cp -r extensions/light-style/* ~/.local/share/gnome-shell/extensions/light-style@projectbluefin.io/
+```
 
 #### Install Power Status Color
 ```bash
@@ -89,6 +113,7 @@ glib-compile-schemas ~/.local/share/gnome-shell/extensions/syncthing-toggle@proj
 ### Enable Extensions
 
 ```bash
+gnome-extensions enable light-style@projectbluefin.io
 gnome-extensions enable power-status-color@projectbluefin.io
 gnome-extensions enable syncthing-toggle@projectbluefin.io
 ```
@@ -96,6 +121,7 @@ gnome-extensions enable syncthing-toggle@projectbluefin.io
 Check status:
 
 ```bash
+gnome-extensions info light-style@projectbluefin.io
 gnome-extensions info power-status-color@projectbluefin.io
 gnome-extensions info syncthing-toggle@projectbluefin.io
 ```
