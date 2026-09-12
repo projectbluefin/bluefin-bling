@@ -1,0 +1,55 @@
+name: Extension Validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: extension validation suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install glib schema compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libglib2.0-bin
+
+      - name: Run extension validation suite
+        run: python3 -m unittest discover -s tests -t tests -v
+
+      - name: Strict GSettings schema compilation check
+        run: |
+          shopt -s nullglob
+          schemas=(extensions/*/schemas/)
+          if [ ${#schemas[@]} -eq 0 ]; then
+            echo "No extension schemas found to compile."
+          else
+            for dir in "${schemas[@]}"; do
+              echo "Validating schema compilation in $dir"
+              glib-compile-schemas --strict --dry-run "$dir"
+            done
+          fi
