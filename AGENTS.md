@@ -136,11 +136,12 @@ python3 -m unittest discover -s tests -t tests -v
 Standard library only — no dependencies to install. It enforces `metadata.json`
 invariants (uuid ↔ folder name, shell-version, settings-schema), GSettings schema
 correctness (id ↔ metadata, path convention, no unknown or dead keys), `node --check`
-on every JS source, and `disable()` teardown hygiene. See
+on every JS source, `disable()` teardown hygiene, and that every CSS class a source
+applies has a rule in the extension's stylesheet. See
 [`docs/skills/extension-validation.md`](docs/skills/extension-validation.md).
 
-There is no CI gate yet — run the suite locally before every PR. Also compile the
-schemas:
+`.github/workflows/ci.yml` runs the same suite on every pull request and push to
+`main` — run it locally first anyway. Also compile the schemas:
 
 ```bash
 # Compile and validate GSettings schemas

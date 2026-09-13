@@ -103,3 +103,55 @@ def port_adjustment_bounds(prefs_source: str) -> tuple[int, int]:
     if "lower" not in bounds or "upper" not in bounds:
         raise ValueError(f"Gtk.Adjustment missing a bound: {bounds}")
     return bounds["lower"], bounds["upper"]
+
+
+# A GJS source applies CSS by name (`actor.add_style_class_name('foo')`) and the
+# rule that gives the name meaning lives in the extension's stylesheet.css. The
+# two sides are joined by a bare string: rename or drop one and GNOME Shell
+# reports nothing at all, the styling is simply a silent no-op. These helpers
+# read both sides so the suite can assert they still agree.
+_STRING_CONST_RE = re.compile(
+    r"""\bconst\s+(?P<name>[A-Za-z_$][\w$]*)\s*=\s*(['"])(?P<value>[^'"]*)\2""",
+)
+# add/set/remove/toggle name a class the extension owns; has_style_class_name is
+# excluded because it probes for classes GNOME Shell itself owns ('icon-button').
+_STYLE_CLASS_CALL_RE = re.compile(
+    r"""(?:add|set|remove|toggle)_style_class_name\s*\(\s*(?P<arg>[^),]+?)\s*[),]""",
+)
+_CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+_CSS_CLASS_RE = re.compile(r"\.(?P<name>-?[_a-zA-Z][\w-]*)")
+
+
+def stylesheet_files(ext_dir: Path) -> list[Path]:
+    """Return every CSS stylesheet shipped by an extension."""
+    return sorted(ext_dir.rglob("*.css"))
+
+
+def applied_style_classes(source: str) -> set[str]:
+    """Return CSS class names a GJS source owns and applies to actors.
+
+    Handles a string literal argument and a module-level ``const NAME = 'class'``
+    passed by identifier. An argument this helper cannot resolve statically (a
+    parameter, a template literal, a property) is skipped rather than guessed at.
+    """
+    constants = {
+        m.group("name"): m.group("value") for m in _STRING_CONST_RE.finditer(source)
+    }
+    classes: set[str] = set()
+    for match in _STYLE_CLASS_CALL_RE.finditer(source):
+        arg = match.group("arg").strip()
+        if len(arg) >= 2 and arg[0] in "'\"" and arg[-1] == arg[0]:
+            value = arg[1:-1]
+        elif arg in constants:
+            value = constants[arg]
+        else:
+            continue
+        # set_style_class_name() takes a space-separated list.
+        classes.update(name for name in value.split() if name)
+    return classes
+
+
+def css_class_names(stylesheet_source: str) -> set[str]:
+    """Return every class name a stylesheet defines a rule for."""
+    without_comments = _CSS_COMMENT_RE.sub(" ", stylesheet_source)
+    return {m.group("name") for m in _CSS_CLASS_RE.finditer(without_comments)}

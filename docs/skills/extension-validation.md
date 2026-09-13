@@ -71,6 +71,19 @@ one-by-one, so any file a new extension adds was silently never checked.
   is cancelled in `disable()`; a `Gio.FileMonitor` is both disconnected and cancelled
   in `disable()`; `disable()` is never an empty body
 
+`tests/test_extension_styles.py`
+- every CSS class an extension applies to an actor (`add_/set_/remove_/toggle_style_class_name`
+  with a string literal or a `const NAME = 'class'` identifier) has a rule in a
+  stylesheet under that extension's folder. The JS side and the CSS side are joined
+  only by a bare string, so renaming one side makes the styling a silent no-op —
+  GNOME Shell reports nothing at all
+- an extension that applies style classes ships a stylesheet
+- `has_style_class_name()` is deliberately *not* counted: it probes for classes
+  GNOME Shell owns (`icon-button`), which the extension must not redefine. An
+  argument that cannot be resolved statically (a parameter, a template literal) is
+  skipped rather than guessed at — a class name that only ever reaches the actor
+  through a parameter is invisible to this gate, so keep the names in constants
+
 ## Extending the suite
 
 Add assertions to the existing test classes rather than new hardcoded checks.
