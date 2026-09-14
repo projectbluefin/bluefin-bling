@@ -127,14 +127,14 @@ export var ServiceIndicator = GObject.registerClass(
 		}
 
 		async checkStatus() {
+			const serviceName = this._validatedServiceName()
+			if (!serviceName) {
+				this.updateStatus(false)
+				return
+			}
 			try {
 				const proc = Gio.Subprocess.new(
-					[
-						'systemctl',
-						'--user',
-						'status',
-						this._settings.get_string('service-name'),
-					],
+					['systemctl', '--user', 'status', serviceName],
 					Gio.SubprocessFlags.STDOUT_PIPE
 				)
 
