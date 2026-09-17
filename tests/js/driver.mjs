@@ -243,10 +243,16 @@ const results = {}
 
 	networkMonitor.metered = true
 	harness.subprocesses = []
+	// The stop succeeds, so the next status read has to report a dead unit;
+	// leaving it "running" would let the toggle claim both at once.
+	harness.statusStdout = STOPPED
 	networkMonitor.emit('notify::network-metered')
 	await flush()
 	results.meteredSignal.whenMetered = harness.systemctlVerbs()
 	results.meteredSignal.notifications = harness.notifications
+	results.meteredSignal.checked = extension._indicator._toggle.checked
+	results.meteredSignal.subtitle = extension._indicator._toggle.subtitle
+	results.meteredSignal.indicatorVisible = extension._indicator._indicator.visible
 
 	// After disable the handler is gone entirely.
 	extension.disable()

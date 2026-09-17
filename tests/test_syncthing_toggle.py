@@ -387,6 +387,13 @@ class TestSyncthingToggleLifecycle(unittest.TestCase):
         )
         self.assertTrue(failed["errors"], "the failed stop was swallowed silently")
 
+    def test_metered_pause_leaves_the_toggle_showing_a_stopped_unit(self):
+        """After the pause the quick toggle must not still read as syncing."""
+        signal = self.results["meteredSignal"]
+        self.assertEqual(signal["checked"], False)
+        self.assertEqual(signal["subtitle"], "Stopped")
+        self.assertEqual(signal["indicatorVisible"], False)
+
     def test_extension_provisions_no_folders(self):
         """dakota ships the syncthing config via /etc/skel; the extension must
         not create ~/Sync, seed folders or run `syncthing generate`."""
