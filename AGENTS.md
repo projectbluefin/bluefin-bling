@@ -133,14 +133,17 @@ new extension is covered without editing any list:
 python3 -m unittest discover -s tests -t tests -v
 ```
 
-Standard library only — no dependencies to install. It enforces `metadata.json`
-invariants (uuid ↔ folder name, shell-version, settings-schema), GSettings schema
-correctness (id ↔ metadata, path convention, no unknown or dead keys), `node --check`
-on every JS source, and `disable()` teardown hygiene. See
+Standard library only — no dependencies to install, but `node` must be present:
+`node --check` and the behavioural harness under `tests/js/` skip themselves
+when it is missing, so a run without node is a weaker green than it looks. The
+suite enforces `metadata.json` invariants (uuid ↔ folder name, shell-version,
+settings-schema), GSettings schema correctness (id ↔ metadata, path convention,
+no unknown or dead keys), `disable()` teardown hygiene, and — for
+syncthing-toggle — the real enable/disable lifecycle under stubbed GJS. See
 [`docs/skills/extension-validation.md`](docs/skills/extension-validation.md).
 
-There is no CI gate yet — run the suite locally before every PR. Also compile the
-schemas:
+`.github/workflows/ci.yml` runs the same suite on every pull request and push to
+`main`. Run it locally first anyway, and compile the schemas:
 
 ```bash
 # Compile and validate GSettings schemas

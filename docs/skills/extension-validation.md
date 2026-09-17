@@ -19,12 +19,15 @@ metadata:
 python3 -m unittest discover -s tests -t tests -v
 ```
 
-Standard library only — no `pip install`, no `package.json`. `node` is used via
-`node --check` and the syntax test skips itself if `node` is absent.
+Standard library only — no `pip install`, no `package.json`. `node` is required
+for the parts of the suite that execute JavaScript: `node --check` on every
+source, and the behavioural harness below. Both **skip silently when `node` is
+absent**, so a green local run on a machine without node has proven far less
+than it looks — CI installs node 22 for this reason.
 
 Pull requests and pushes to `main` are automatically validated by CI
-(`.github/workflows/ci.yml`). Before opening a PR, run this locally:
-Also compile the schemas:
+(`.github/workflows/ci.yml`). Before opening a PR, run the suite locally and
+compile the schemas:
 
 ```bash
 glib-compile-schemas --strict --dry-run extensions/syncthing-toggle/schemas/
@@ -70,6 +73,31 @@ one-by-one, so any file a new extension adds was silently never checked.
 - teardown: a `GLib.timeout_add*` implies `GLib.Source.remove`; a `Gio.Cancellable`
   is cancelled in `disable()`; a `Gio.FileMonitor` is both disconnected and cancelled
   in `disable()`; `disable()` is never an empty body
+
+## Behavioural harness (`tests/js/`)
+
+The checks above read source text. `tests/js/driver.mjs` instead *runs* the
+extension: it loads the real `extension.js` and `toggle.js` under node with
+`gi://` and `resource:///org/gnome/shell/…` resolved to the stubs in
+`tests/js/stubs/` (see `loader.mjs`), drives the actual `enable()`/`disable()`
+lifecycle through a set of scenarios, and prints what the extension did as JSON
+on stdout. `tests/test_syncthing_toggle.py` asserts on that JSON.
+
+The stubs record observable effects — spawned argv and the cancellable each
+call carried, installed main-loop sources, connected signal handlers,
+`Main.notify()` calls, launched URIs, and any file or directory the extension
+touched — so tests assert what a user or the system would see, never source
+text. Adding a scenario means adding a block to `driver.mjs` that writes one
+key into `results`, plus the assertions for it.
+
+Two rules keep these honest:
+
+- **Identify UI by behaviour, not by label.** The Web GUI scenario finds the
+  menu entry by invoking every action and seeing which one launches a URI.
+  Matching on `'Open Web GUI'` would turn a copy change into a test failure.
+- **Mutate the extension to prove a test bites.** Every scenario here was
+  checked by breaking `toggle.js` on purpose (hardcoding the GUI port, moving
+  it off loopback, deleting the launch call) and confirming the suite failed.
 
 ## Extending the suite
 
