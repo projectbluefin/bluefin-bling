@@ -32,6 +32,15 @@ README = REPO_ROOT / "README.md"
 # Matches a skill doc reference in either supported layout:
 # docs/skills/<name>.md or docs/skills/<name>/SKILL.md.
 SKILL_REF_RE = re.compile(r"docs/skills/(?:[a-zA-Z0-9._-]+/)?[a-zA-Z0-9._-]+\.md")
+# docs/SKILL.md sits inside docs/, so its links to skill docs are written
+# relative to that directory (`skills/<name>.md`). Matching only the repo-root
+# form would make the gate demand links that do not resolve on disk.
+ROUTER_REL_REF_RE = re.compile(r"(?<!docs/)\bskills/(?:[a-zA-Z0-9._-]+/)?[a-zA-Z0-9._-]+\.md")
+
+
+def _router_relative(repo_relative_path: str) -> str:
+    """Map ``docs/skills/x.md`` to the ``skills/x.md`` form the router uses."""
+    return repo_relative_path[len("docs/") :]
 
 
 def skill_docs() -> list[str]:
@@ -138,14 +147,23 @@ class TestSkillsCatalog(unittest.TestCase):
         router = SKILL_ROUTER.read_text(encoding="utf-8")
         for name in skill_docs():
             with self.subTest(skill=name):
-                if name not in router:
+                # docs/SKILL.md lives inside docs/, so a link that actually
+                # resolves from it is `skills/<name>.md`, not the repo-root
+                # `docs/skills/<name>.md`. Accept either: requiring the
+                # repo-root form would force the router to carry links that
+                # 404 when the file is read from disk.
+                if name not in router and _router_relative(name) not in router:
                     self.fail(
                         f"docs/SKILL.md does not route {name}; the router is "
                         "the documented agent entry point, so the doc is unreachable"
                     )
 
     def test_skill_router_routes_no_missing_skill_doc(self):
-        routed = set(SKILL_REF_RE.findall(SKILL_ROUTER.read_text(encoding="utf-8")))
+        text = SKILL_ROUTER.read_text(encoding="utf-8")
+        routed = set(SKILL_REF_RE.findall(text))
+        routed |= {
+            f"docs/{ref}" for ref in ROUTER_REL_REF_RE.findall(text)
+        }
         present = set(skill_docs())
         for name in sorted(routed - present):
             with self.subTest(skill=name):
