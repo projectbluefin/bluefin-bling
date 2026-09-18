@@ -31,8 +31,9 @@ metadata:
 
 ## What `main` actually requires
 
-Two active rulesets govern `main`. Derive them rather than trusting this list —
-see [Verification](#verification).
+One active ruleset governs `main` (`main — review policy`, 22705148); a second
+(`main — merge queue`, 23208287) is currently disabled. Derive them rather than
+trusting this list — see [Verification](#verification).
 
 | Requirement | Value |
 |---|---|
@@ -40,21 +41,36 @@ see [Verification](#verification).
 | Required status check | `validate extensions (tests, node --check, glib-compile-schemas)` |
 | Dismiss stale reviews on push | yes |
 | Require approval of most recent push | yes |
-| Merge method | **SQUASH**, through a merge queue |
-<<<<<<< Updated upstream
-=======
+| Merge method | **squash** |
 | Direct push to `main` | **rejected, no exceptions** |
+| Merge queue | **disabled 2026-09-18** — see below |
 
 There is no doc-only fast path. `AGENTS.md` and `docs/SKILL.md` both claimed one
-until 2026-09-18; the ruleset has always rejected it:
+until 2026-09-18; the ruleset rejects every direct push:
 
 ```
 remote: error: GH013: Repository rule violations found for refs/heads/main.
-remote: - Changes must be made through the merge queue
 remote: - Required status check "validate extensions (...)" is expected.
 remote: - Changes must be made through a pull request.
 ```
->>>>>>> Stashed changes
+
+### Why the merge queue is currently off
+
+Ruleset `main — merge queue` (23208287) was set to `enforcement: disabled` on
+2026-09-18. It had deadlocked the repository: it required a `merge_group` check
+that `ci.yml` could never produce, and **both rulesets have `bypass_actors: []`**,
+so not even an admin could merge past it. Nothing merged between 2026-09-12 and
+2026-09-18.
+
+Review enforcement was **not** relaxed. The `required_status_checks` rule lived
+inside that same ruleset, so disabling it silently dropped CI enforcement too;
+the rule was immediately re-added to `main — review policy` (22705148). Effective
+rules on `main` are still `pull_request` (2 approvals) + `required_status_checks`
++ `deletion` + `non_fast_forward`.
+
+Re-enable the queue only after a `merge_group:` trigger is on `main` — see #49 —
+and verify with the canary command in [Verification](#verification). Restoring
+the queue without that trigger re-freezes the repo.
 
 ## Only write-access approvals count
 
