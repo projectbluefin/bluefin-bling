@@ -130,7 +130,7 @@ Which stylesheets Shell loads, and that it never recurses:
 
 ```bash
 curl -fsSL https://gitlab.gnome.org/GNOME/gnome-shell/-/raw/48.0/js/ui/extensionSystem.js \
-  | sed -n '/_loadExtensionStylesheet(extension)/,/^    }/p'
+  | sed -n '/^    _loadExtensionStylesheet(extension) {/,/^    }$/p'
 ```
 
 Expect the four candidate names and a single `extension.dir.get_child(name)` lookup
