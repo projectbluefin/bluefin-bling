@@ -22,7 +22,8 @@ python3 -m unittest discover -s tests -t tests -v
 Standard library only — no `pip install`, no `package.json`. `node` is used via
 `node --check` and the syntax test skips itself if `node` is absent.
 
-There is no CI workflow in this repo yet, so **run this before opening any PR**.
+Pull requests and pushes to `main` are automatically validated by CI
+(`.github/workflows/ci.yml`). Before opening a PR, run this locally:
 Also compile the schemas:
 
 ```bash
