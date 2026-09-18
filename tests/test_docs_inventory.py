@@ -11,10 +11,12 @@ filesystem entity the README claims to enumerate is actually enumerated. A new
 skill doc, a new top-level file or a new extension therefore fails here until
 the README is updated, instead of silently making the README wrong.
 
-``AGENTS.md`` carries the same class of drift and is intentionally out of scope
-here -- see issue #47. This module covers only the ``README.md`` inventories,
-so issue #47 stays open for the ``AGENTS.md`` remainder it enumerates and must
-not be auto-closed by this work.
+``AGENTS.md`` carries the same class of drift in its own ``## Repo Layout``
+tree. Its facts were corrected separately, but a corrected tree with nothing
+comparing it to the filesystem is exactly the state this module exists to
+end -- it simply rots again on the next top-level addition. The layout tree is
+therefore gated here on the same terms as the README structure tree, which
+closes the ``AGENTS.md`` remainder of issue #47.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from extension_manifest import REPO_ROOT, extension_dirs, load_metadata
 SKILLS_DIR = REPO_ROOT / "docs" / "skills"
 SKILL_ROUTER = REPO_ROOT / "docs" / "SKILL.md"
 README = REPO_ROOT / "README.md"
+AGENTS = REPO_ROOT / "AGENTS.md"
 
 # Matches a skill doc reference in either supported layout:
 # docs/skills/<name>.md or docs/skills/<name>/SKILL.md.
@@ -101,20 +104,30 @@ def readme_text() -> str:
     return README.read_text(encoding="utf-8")
 
 
-def structure_tree() -> str:
-    """Return the fenced tree that follows the README Repository Structure heading.
+def _fenced_tree(text: str, heading: str, source: str) -> str:
+    """Return the fenced tree that follows ``heading`` in ``text``.
 
     Raises AssertionError-friendly ValueError if the section or its fence is
-    gone, so a restructured README fails loudly rather than vacuously passing.
+    gone, so a restructured document fails loudly rather than vacuously
+    passing.
     """
-    text = readme_text()
-    heading = re.search(r"^##\s+Repository Structure\s*$", text, re.MULTILINE)
-    if heading is None:
-        raise ValueError("README.md has no '## Repository Structure' section")
-    fence = re.search(r"```[^\n]*\n(?P<body>.*?)```", text[heading.end() :], re.DOTALL)
+    match = re.search(rf"^##\s+{re.escape(heading)}\s*$", text, re.MULTILINE)
+    if match is None:
+        raise ValueError(f"{source} has no '## {heading}' section")
+    fence = re.search(r"```[^\n]*\n(?P<body>.*?)```", text[match.end() :], re.DOTALL)
     if fence is None:
-        raise ValueError("README.md '## Repository Structure' section has no fenced tree")
+        raise ValueError(f"{source} '## {heading}' section has no fenced tree")
     return fence.group("body")
+
+
+def structure_tree() -> str:
+    """Return the fenced tree under the README Repository Structure heading."""
+    return _fenced_tree(readme_text(), "Repository Structure", "README.md")
+
+
+def agents_layout_tree() -> str:
+    """Return the fenced tree under the AGENTS.md Repo Layout heading."""
+    return _fenced_tree(AGENTS.read_text(encoding="utf-8"), "Repo Layout", "AGENTS.md")
 
 
 class TestSkillsCatalog(unittest.TestCase):
@@ -191,6 +204,34 @@ class TestRepositoryStructureTree(unittest.TestCase):
                 if name not in tree:
                     self.fail(
                         f"README.md Repository Structure omits top-level '{name}'; "
+                        "the tree describes a repository that does not exist"
+                    )
+
+
+class TestAgentsRepoLayoutTree(unittest.TestCase):
+    """Gate AGENTS.md's Repo Layout tree, the remainder of issue #47.
+
+    AGENTS.md is the agent-facing entry point, so a layout tree that omits a
+    top-level entry sends every agent into a repository it cannot see all of.
+    """
+
+    def test_layout_section_is_present(self):
+        try:
+            tree = agents_layout_tree()
+        except ValueError as exc:
+            self.fail(str(exc))
+        self.assertTrue(tree.strip(), "AGENTS.md Repo Layout tree is empty")
+
+    def test_tree_names_every_top_level_entry(self):
+        try:
+            tree = agents_layout_tree()
+        except ValueError as exc:
+            self.fail(str(exc))
+        for name in top_level_entries():
+            with self.subTest(entry=name):
+                if name not in tree:
+                    self.fail(
+                        f"AGENTS.md Repo Layout omits top-level '{name}'; "
                         "the tree describes a repository that does not exist"
                     )
 
