@@ -146,7 +146,10 @@ python3 -m unittest discover -s tests -t tests -v
 Standard library only — no dependencies to install. It enforces `metadata.json`
 invariants (uuid ↔ folder name, shell-version, settings-schema), GSettings schema
 correctness (id ↔ metadata, path convention, no unknown or dead keys), `node --check`
-on every JS source, and `disable()` teardown hygiene. See
+on every JS source, `disable()` teardown hygiene, and that every CSS class a source
+applies has a rule in each stylesheet GNOME Shell would actually load for that
+extension — Shell reads `stylesheet.css` and its variant siblings from the extension
+root only, and loads exactly one of them. See
 [`docs/skills/extension-validation.md`](docs/skills/extension-validation.md).
 
 `.github/workflows/ci.yml` runs this same suite on every pull request and on

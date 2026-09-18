@@ -20,12 +20,12 @@ def _eval_service_name_validator(name: str | None) -> bool:
     js_code = r"""
     const fs = require('fs');
     const toggleSource = fs.readFileSync(process.argv[1], 'utf8');
-    const startIdx = toggleSource.indexOf('/^[a-zA-Z0-9_.:@-]+\\.service$/');
+    const startIdx = toggleSource.indexOf('/^[a-zA-Z0-9_][a-zA-Z0-9_.:@-]*\\.service$/');
     if (startIdx === -1) {
         console.error('Pattern literal not found in toggle.js');
         process.exit(2);
     }
-    const pattern = /^[a-zA-Z0-9_.:@-]+\.service$/;
+    const pattern = /^[a-zA-Z0-9_][a-zA-Z0-9_.:@-]*\.service$/;
     let input;
     try {
         input = JSON.parse(fs.readFileSync(0, 'utf8'));
@@ -52,7 +52,7 @@ def _eval_service_name_validator(name: str | None) -> bool:
 class TestSyncthingToggleServiceName(unittest.TestCase):
     def test_regex_present_in_toggle_js(self):
         source = TOGGLE_JS.read_text(encoding="utf-8")
-        self.assertIn(r"/^[a-zA-Z0-9_.:@-]+\.service$/", source)
+        self.assertIn(r"/^[a-zA-Z0-9_][a-zA-Z0-9_.:@-]*\.service$/", source)
 
     def test_valid_service_names_accepted(self):
         valid_cases = [
@@ -90,6 +90,11 @@ class TestSyncthingToggleServiceName(unittest.TestCase):
             "syncthing.service --now",
             "syncthing.service\x00",
             "syncthing/foo.service",
+            # Leading dash: would be parsed by systemctl as an option, not a
+            # unit name (option injection via dconf-writable free-text key).
+            "-syncthing.service",
+            "--system.service",
+            "--global.service",
         ]
         for name in invalid_cases:
             with self.subTest(name=name):

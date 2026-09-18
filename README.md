@@ -10,6 +10,8 @@ This monorepo maintains extensions and visual integrations tailored for Bluefin 
 
 ```
 bluefin-bling/
+├── .github/
+│   └── workflows/ci.yml       # Runs the validation suite on every PR and on main
 ├── extensions/
 │   ├── power-status-color/    # Quick Settings power button status styling
 │   │   ├── metadata.json
@@ -22,9 +24,19 @@ bluefin-bling/
 │       ├── prefs.js
 │       ├── icons/
 │       └── schemas/
+├── docs/
+│   ├── SKILL.md               # Task → skill router
+│   └── skills/                # Authoritative operational knowledge
+├── tests/                     # Discovery-based validation suite (stdlib unittest)
+├── AGENTS.md
 ├── README.md
+├── SECURITY.md
+├── renovate.json
 └── .gitignore
 ```
+
+`tests/test_docs_inventory.py` checks this tree against the actual top level, so a
+new top-level entry fails CI until it is named here.
 
 ---
 
@@ -142,4 +154,9 @@ This repository follows standard Project Bluefin practices:
   - [`pr-review-and-merge.md`](docs/skills/pr-review-and-merge.md)
   - [`quick-settings-integration.md`](docs/skills/quick-settings-integration.md)
   - [`skill-improvement.md`](docs/skills/skill-improvement.md)
+
+This catalog and [`docs/SKILL.md`](docs/SKILL.md) are both checked against
+`docs/skills/` by `tests/test_docs_inventory.py`: every skill doc must appear in
+**both** this catalog **and** `docs/SKILL.md`, and missing from either one fails
+CI.
 

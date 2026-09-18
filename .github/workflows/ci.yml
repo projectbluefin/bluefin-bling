@@ -8,12 +8,21 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The `main` ruleset runs a merge queue. The queue builds a temporary
+  # `merge_group` ref and waits for the required `validate extensions` context
+  # to report against it. Without this trigger no run is ever started, the
+  # context never reports, and every queued PR sits in AWAITING_CHECKS until
+  # check_response_timeout_minutes expires and the entry is dropped.
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
 permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
+  # Safe for merge_group: each queue entry gets its own temporary ref, so this
+  # only cancels a run whose SHA the queue has already superseded.
   cancel-in-progress: true
 
 jobs:
@@ -24,14 +33,14 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # The unittest suite runs `node --check` over every JS source and skips the
       # check only when node is absent. Set up node so the gate actually runs.
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: "22"
+          node-version: "24"
 
       # glib-compile-schemas ships in libglib2.0-bin, not the base image.
       - name: Install glib-compile-schemas
