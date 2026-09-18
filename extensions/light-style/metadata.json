@@ -1,7 +1,7 @@
 {
   "uuid": "light-style@projectbluefin.io",
-  "name": "Light Style",
-  "description": "Adaptive light/dark style theming for top bar, dock, and app grid",
+  "name": "Bluefin Light Style",
+  "description": "Follows the desktop color-scheme setting so GNOME Shell itself switches to its light theme, and gives Dash to Dock's running dot the user's accent colour",
   "shell-version": [
     "45",
     "46",

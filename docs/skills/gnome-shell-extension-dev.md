@@ -1,6 +1,6 @@
 ---
 name: gnome-shell-extension-dev
-version: "1.1"
+version: "1.2"
 last_updated: "2026-09-18"
 id: gnome-shell-extension-dev
 one_line_purpose: Development, architecture, and lifecycle rules for modern GNOME Shell extensions.
@@ -109,7 +109,9 @@ function runCommandAsync(argv, cancellable) {
 5. **Dynamic Theme & Style Class Management:**
    - Scope custom theme overrides under a top-level style class on `Main.uiGroup` (e.g. `Main.uiGroup.add_style_class_name('light-style-active')`).
    - Listen to `changed::color-scheme` on `Gio.Settings({ schema_id: 'org.gnome.desktop.interface' })` and notify `St.Settings.get().notify('color-scheme')` after toggling `Main.sessionMode.colorScheme`.
-   - In `disable()`, synchronously disconnect the settings signal, remove the style class from `Main.uiGroup`, reset `Main.sessionMode.colorScheme = 'prefer-dark'`, and notify `St.Settings` to ensure zero style leakage.
+   - **Save and restore `Main.sessionMode.colorScheme`; never reset it to a literal.** Capture `this._savedColorScheme = Main.sessionMode.colorScheme` in `enable()` *before* the first sync, write that value back in `disable()`, then null it. `js/ui/sessionMode.js` `_loadMode()` copies `colorScheme` out of a custom `/usr/share/gnome-shell/modes/*.json` because it is a key of the restrictive `DEFAULT_MODE`, so an image shipping its own session mode — Bluefin and Dakota both do — has a value here that is not `'prefer-dark'`. Hardcoding the reset silently destroys it, and stomps any concurrently enabled theming extension driving the same property.
+   - Do the same in `_sync()`: the "back to dark" branch restores the saved value, it does not assert `'prefer-dark'`.
+   - Remove the style class from `Main.uiGroup` and disconnect the settings signal synchronously in `disable()` to guarantee zero style leakage.
 
 ---
 
@@ -161,6 +163,17 @@ extension with no hardcoded list.
   entry — and reject a leading `-`, or `systemctl` parses it as an option.
 - **Hardcoded accent colours.** Since GNOME 47 the accent is user-selectable;
   use the `-st-accent-color` keyword instead of a literal like `#3584e4`.
+- **Resetting shared Shell state to a literal instead of the value you found.**
+  `Main.sessionMode.colorScheme = 'prefer-dark'` in `disable()` is the common
+  case: the session mode may legitimately carry another value, and another
+  enabled extension may own it right now. Save in `enable()`, restore in
+  `disable()`.
+- **Re-theming in CSS what the variant you just selected already themes.**
+  Flipping `sessionMode.colorScheme` makes the Shell load
+  `gnome-shell-light.css`, which already styles `#panel`, `.dash-background`,
+  `.overview-tile`, `.search-entry` and friends. Piling fixed hex and
+  `!important` on top fights that sheet and freezes a palette Adwaita has since
+  moved on from. Ship only what the stock sheet does not express.
 
 ## Verification
 

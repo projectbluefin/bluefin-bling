@@ -13,7 +13,7 @@ bluefin-bling/
 ├── .github/
 │   └── workflows/ci.yml       # Runs the validation suite on every PR and on main
 ├── extensions/
-│   ├── light-style/           # Adaptive light/dark style theming for panel, dock, app grid
+│   ├── light-style/           # Follows the desktop color-scheme into GNOME Shell's light theme
 │   │   ├── metadata.json
 │   │   ├── extension.js
 │   │   ├── stylesheet.css
@@ -82,18 +82,19 @@ A Quick Settings toggle for Bluefin's built-in Sync Folder peer sharing service.
   - **Disabled:** *"Sync Folder Sharing Disabled — File sharing is paused."*
 - **Submenu Actions:** Quick link to open the Syncthing Web GUI directly in the default browser.
 
-### 3. `light-style` (Adaptive Light Style Theming)
+### 3. `light-style` (Light Style Follower)
 
 **UUID:** `light-style@projectbluefin.io`  
+**Display name:** Bluefin Light Style — deliberately distinct from the upstream `light-style@gnome-shell-extensions.gcampax.github.com` extension, which presents as plain "Light Style".  
 **Compatibility:** GNOME Shell 45, 46, 47, 48, 49, 50+
 
-Adaptive runtime theming for top bar, dock, and app grid that coordinates with GNOME's Dark/Light style:
+Makes GNOME Shell itself follow the desktop light/dark preference, rather than
+repainting the Shell from the extension:
 
-- **Dynamic Theme Tracking:** Listens to `org.gnome.desktop.interface color-scheme` signal and applies styles instantly without restarting GNOME Shell.
-- **Top Bar (`#panel`):** Polished light palette (`rgba(255, 255, 255, 0.88)`) with dark text/icons (`#2e3436`) in light mode.
-- **Dock & Show Apps:** Styled dock container and dark symbolic styling for the show apps grid button.
-- **Overview & App Grid:** Light background with crisp typography and search entry styling.
-- **Synchronous Cleanup:** Removes `.light-style-active` from `Main.uiGroup` and restores session mode palette cleanly upon disable.
+- **Dynamic Theme Tracking:** Watches `org.gnome.desktop.interface color-scheme` and re-syncs live, with no Shell restart.
+- **Session Mode Handover:** Sets `Main.sessionMode.colorScheme` to `prefer-light`, which is what makes the Shell load its own `gnome-shell-light.css`. Panel, dash, overview, search entry and app folders are then themed by Adwaita, not by hex in this repo.
+- **Accent-Aware Dock Dot:** The one supplementary rule — Dash to Dock's running dot uses `-st-accent-color` (GNOME 47+) instead of the foreground colour. On 45/46 the declaration is dropped and the dot keeps the Shell default.
+- **Non-Destructive Teardown:** `enable()` records the session's existing `colorScheme` and `disable()` restores exactly that value, so a custom `/usr/share/gnome-shell/modes/*.json` — which Bluefin and Dakota ship — survives an enable/disable cycle. The `.light-style-active` class is removed from `Main.uiGroup` synchronously.
 
 ---
 
