@@ -24,6 +24,7 @@ Agent entry point for `projectbluefin/bluefin-bling`. Load only the skill(s) tha
 | Inspect or integrate with pure `bootc` image status or system updates | `docs/skills/gnome-shell-extension-dev.md` |
 | Work with GSettings schemas or preferences UI | `docs/skills/gnome-shell-extension-dev.md` |
 | **Quality & Lifecycle Hygiene** | |
+| Validate an extension or add a test | `docs/skills/extension-validation.md` |
 | Debug asynchronous I/O, `Gio.Subprocess`, `Gio.FileMonitor`, or cancellables | `docs/skills/gnome-shell-extension-dev.md` |
 | Ensure zero resource leaks upon `disable()` | `docs/skills/gnome-shell-extension-dev.md` |
 | **Factory and self-improvement** | |
