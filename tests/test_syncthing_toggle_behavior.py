@@ -129,16 +129,19 @@ class TestSyncthingToggleIconResolution(unittest.TestCase):
 
 @unittest.skipIf(NODE is None, "node is not installed; cannot execute toggle.js")
 class TestSyncthingToggleWebGui(unittest.TestCase):
-    def test_web_gui_url_is_built_from_the_port_setting(self):
+    def test_web_gui_url_targets_the_address_syncthing_listens_on(self):
+        # dakota ships `<address>127.0.0.1:8384</address>` — IPv4 loopback only.
+        # `localhost` can resolve to ::1 first, where nothing listens, so the
+        # entry would open a dead page.
         result = run_scenario("web-gui-url", port=8384)
-        self.assertEqual(result["launchedUris"], ["http://localhost:8384"])
+        self.assertEqual(result["launchedUris"], ["http://127.0.0.1:8384"])
         self.assertEqual(result["errors"], [])
 
     def test_web_gui_url_tracks_a_non_default_port(self):
         # The port is read at click time, so a dconf change must take effect
         # without re-enabling the extension.
         result = run_scenario("web-gui-url", port=12345)
-        self.assertEqual(result["launchedUris"], ["http://localhost:12345"])
+        self.assertEqual(result["launchedUris"], ["http://127.0.0.1:12345"])
 
     def test_launch_failure_is_logged_and_not_thrown(self):
         result = run_scenario("web-gui-url", port=8384, launchThrows=True)
@@ -251,18 +254,280 @@ class TestSyncthingToggleClicked(unittest.TestCase):
         run_errors = [e for e in result["errors"] if any("systemctl" in p for p in e)]
         self.assertEqual(
             [e[-1] for e in run_errors],
-            ["Failed to run systemctl start", "Failed to run systemctl enable"],
+            ["Failed to run systemctl start"],
+            "a start that never spawned was still persisted with `enable`",
         )
 
-    def test_systemctl_nonzero_exit_is_logged_and_the_sequence_continues(self):
+    def test_a_start_that_failed_is_not_persisted_and_not_announced(self):
+        """systemctl can refuse: missing unit, masked unit, failing ExecStart.
+
+        Announcing "sharing enabled" for a service that never came up lies to
+        the user, and `enable` would make the broken state come back at the
+        next login.
+        """
         result = run_scenario("clicked", checked=True, systemctlFails=True)
         self.assertEqual(
             result["systemctl"],
-            [
-                ["systemctl", "--user", "start", "syncthing.service"],
-                ["systemctl", "--user", "enable", "syncthing.service"],
-            ],
+            [["systemctl", "--user", "start", "syncthing.service"]],
+            "a failed start was followed by `enable`",
         )
+        self.assertEqual(
+            result["notifications"],
+            [],
+            f"the failure was announced as success: {result['notifications']}",
+        )
+        self.assertTrue(result["errors"], "the failure was swallowed silently")
+
+    def test_a_stop_that_failed_is_not_persisted_and_not_announced(self):
+        result = run_scenario("clicked", checked=False, systemctlFails=True)
+        self.assertEqual(
+            result["systemctl"],
+            [["systemctl", "--user", "stop", "syncthing.service"]],
+        )
+        self.assertEqual(result["notifications"], [])
+
+
+@unittest.skipIf(NODE is None, "node is not installed; cannot execute toggle.js")
+class TestSyncthingToggleEnable(unittest.TestCase):
+    """What the extension does when GNOME Shell calls enable().
+
+    These scenarios drive the real ``extension.js`` entry point, so the
+    reconcile it performs, the poll source it installs and the indicator it
+    registers are all observed rather than assumed.
+    """
+
+    def test_enable_reads_the_unit_once_and_registers_one_indicator(self):
+        # Two initial refreshes mean a duplicate `systemctl status` on every
+        # enable, including every screen unlock.
+        result = run_scenario("enable")
+        self.assertEqual(result["statusSubprocesses"], 1)
+        self.assertEqual(result["externalIndicators"], 1)
+
+    def test_enable_reflects_a_unit_started_outside_the_toggle(self):
+        # `systemctl --user enable` from a previous session, or a terminal:
+        # the toggle must show it without anyone clicking.
+        result = run_scenario("enable", unitRunning=True)
+        self.assertEqual(
+            result["toggle"],
+            {"checked": True, "subtitle": "Running", "indicatorVisible": True},
+        )
+
+    def test_a_session_that_starts_metered_pauses_the_running_unit(self):
+        """`notify::network-metered` fires on changes only.
+
+        Log in on mobile data with the unit enabled from the last session and
+        no signal ever arrives, so enable() has to read the current metered
+        state itself — otherwise the guard protects only sessions that were
+        already open when the connection changed.
+        """
+        result = run_scenario("enable", unitRunning=True, metered=True)
+        self.assertIn(
+            "stop",
+            result["verbs"],
+            f"a metered login left the unit running; ran {result['verbs']}",
+        )
+        self.assertEqual(
+            result["verbs"][0], "status", "the unit was stopped before it was read"
+        )
+        self.assertEqual(
+            result["toggle"],
+            {"checked": False, "subtitle": "Stopped", "indicatorVisible": False},
+        )
+        self.assertTrue(result["notifications"], "sharing was paused without saying so")
+
+    def test_an_unmetered_session_is_left_alone(self):
+        result = run_scenario("enable", unitRunning=True)
+        self.assertEqual(result["verbs"], ["status"])
+        self.assertEqual(result["notifications"], [])
+
+    def test_enable_spawns_nothing_but_systemctl(self):
+        # dakota provisions the syncthing config via /etc/skel; the extension
+        # must not seed folders or run `syncthing generate`.
+        result = run_scenario("enable", unitRunning=True, metered=True)
+        self.assertEqual(result["programs"], ["systemctl"])
+
+    def test_status_is_polled_on_a_timer(self):
+        result = run_scenario("enable")
+        self.assertEqual(
+            result["installedSources"], 1, "expected exactly one status poll source"
+        )
+        # The interval itself is a tuning number, not a contract: what has to
+        # hold is that the source is armed and that a tick reflects reality,
+        # which test_a_poll_tick_picks_up_a_unit_stopped_elsewhere covers.
+        self.assertGreater(
+            result["pollSeconds"], 0, "a zero-second source is not a poll"
+        )
+
+    def test_a_poll_tick_picks_up_a_unit_stopped_elsewhere(self):
+        result = run_scenario("poll-tick")
+        self.assertEqual(result["before"]["subtitle"], "Running")
+        self.assertEqual(result["statusSubprocesses"], 1, "the tick queried no status")
+        self.assertTrue(
+            result["returnValue"], "the timer returned SOURCE_REMOVE; polling dies"
+        )
+        self.assertEqual(
+            result["after"],
+            {"checked": False, "subtitle": "Stopped", "indicatorVisible": False},
+        )
+
+
+@unittest.skipIf(NODE is None, "node is not installed; cannot execute toggle.js")
+class TestSyncthingToggleDisable(unittest.TestCase):
+    def test_disable_leaves_no_source_or_handler_behind(self):
+        result = run_scenario("disable")
+        self.assertEqual(result["liveSources"], 0, "timer source outlived disable()")
+        self.assertEqual(
+            result["networkMonitorHandlers"],
+            0,
+            "network-metered handler outlived disable()",
+        )
+        self.assertEqual(
+            result["toggleHandlers"], 0, "clicked handler outlived disable()"
+        )
+        self.assertTrue(result["cancellableCancelled"])
+
+    def test_a_stale_tick_or_late_click_spawns_nothing(self):
+        result = run_scenario("disable")
+        self.assertFalse(
+            result["staleTimerReturn"], "a stale tick asked to keep polling"
+        )
+        self.assertEqual(result["subprocessesAfterDisable"], [])
+        self.assertEqual(result["notificationsAfterDisable"], [])
+
+    def test_teardown_runs_once_even_if_destroy_is_called_again(self):
+        # gnome-shell destroys the quick settings items and then the indicator,
+        # so destroy() is reachable twice.
+        result = run_scenario("disable")
+        self.assertIsNone(
+            result["secondDestroyError"],
+            "destroy() after disable() raised instead of being a no-op",
+        )
+        self.assertEqual(result["superDestroyCount"], 1, "teardown ran more than once")
+
+    def test_disable_cancels_in_flight_calls_and_kills_their_children(self):
+        result = run_scenario("cancellation")
+        self.assertGreaterEqual(
+            result["inFlightAtDisable"], 1, "the scenario spawned nothing to cancel"
+        )
+        self.assertTrue(
+            result["everyCallCancellable"],
+            "a subprocess was started with a null cancellable and cannot be aborted",
+        )
+        self.assertTrue(
+            result["everySubprocessForcedExit"],
+            "cancelling a Cancellable only abandons the wait; the systemctl child "
+            "keeps running unless cancellation is wired to proc.force_exit()",
+        )
+        self.assertEqual(
+            result["cancellableHandlersLeft"],
+            0,
+            "each call must release its cancellation handler, or a long-lived "
+            "cancellable accumulates one per status poll",
+        )
+
+    def test_a_call_that_succeeded_before_disable_is_not_announced_after(self):
+        """Cancelling a Cancellable does not drop the pending callback.
+
+        `systemctl start` can succeed and the status re-read still be in flight
+        when the extension is disabled — a screen lock, an extension update.
+        The continuation after that await resumes against torn-down widgets, so
+        it must re-check the destroyed flag rather than post "Sharing Enabled"
+        for an extension that is gone, or persist it with `enable`.
+        """
+        result = run_scenario("disable-mid-click")
+        self.assertEqual(
+            result["startedBeforeDisable"],
+            ["start"],
+            "the scenario disabled before the start even ran",
+        )
+        self.assertEqual(
+            result["notifications"],
+            [],
+            f"a disabled extension still notified: {result['notifications']}",
+        )
+        self.assertEqual(
+            [argv[2] for argv in result["systemctl"]],
+            ["start"],
+            "teardown did not stop the click handler from persisting the choice",
+        )
+
+    def test_a_cancelled_callback_never_touches_the_dead_widgets(self):
+        # Cancelling a Cancellable does not drop the callback: it still fires,
+        # with G_IO_ERROR_CANCELLED, after the widgets are gone.
+        result = run_scenario("cancellation")
+        self.assertEqual(result["subtitleAfter"], result["subtitleBefore"])
+        self.assertFalse(result["indicatorVisible"])
+        self.assertEqual(result["notifications"], [])
+
+
+@unittest.skipIf(NODE is None, "node is not installed; cannot execute toggle.js")
+class TestSyncthingToggleMetered(unittest.TestCase):
+    def test_a_metered_connection_refuses_the_start_before_spawning(self):
+        result = run_scenario("metered-click")
+        self.assertEqual(
+            result["systemctl"], [], "systemctl ran despite the metered connection"
+        )
+        self.assertFalse(
+            result["checked"], "the toggle stayed on with nothing started"
+        )
+        self.assertEqual(len(result["notifications"]), 1)
+        self.assertIn("Metered", result["notifications"][0]["body"])
+
+    def test_going_metered_while_running_pauses_the_unit(self):
+        result = run_scenario("metered-signal")
+        self.assertEqual(
+            result["whileUnmetered"], [], "an unmetered notify stopped the service"
+        )
+        self.assertEqual(
+            result["whenMetered"][:1],
+            ["stop"],
+            "going metered while running did not stop the service",
+        )
+        self.assertTrue(result["notifications"])
+
+    def test_after_a_metered_pause_the_toggle_reads_stopped(self):
+        result = run_scenario("metered-signal")
+        self.assertEqual(
+            result["toggle"],
+            {"checked": False, "subtitle": "Stopped", "indicatorVisible": False},
+        )
+
+    def test_the_metered_handler_is_gone_after_disable(self):
+        result = run_scenario("metered-signal")
+        self.assertEqual(
+            result["afterDisable"],
+            [],
+            "the network-metered handler still fired after disable()",
+        )
+
+    def test_a_pause_that_cannot_stop_the_unit_stays_quiet(self):
+        """Saying "paused" while the unit keeps running is worse than silence.
+
+        The user reads it as "safe to stay on mobile data" — the one thing the
+        metered guard exists to prevent — so the notification waits for a stop
+        that actually succeeded.
+        """
+        result = run_scenario("failed-metered-stop")
+        self.assertIn("stop", result["verbs"], "no stop was attempted at all")
+        self.assertEqual(
+            result["notifications"],
+            [],
+            f"a failed stop was announced as a pause: {result['notifications']}",
+        )
+        self.assertTrue(result["errors"], "the failed stop was swallowed silently")
+
+    def test_a_failed_start_leaves_the_toggle_showing_the_real_state(self):
+        result = run_scenario("failed-start")
+        self.assertEqual(
+            result["toggle"],
+            {"checked": False, "subtitle": "Stopped", "indicatorVisible": False},
+        )
+        self.assertNotIn(
+            "enable",
+            result["verbs"],
+            f"a failed start was persisted with `enable`; ran {result['verbs']}",
+        )
+        self.assertEqual(result["notifications"], [])
 
 
 @unittest.skipIf(NODE is None, "node is not installed; cannot execute toggle.js")
@@ -285,6 +550,13 @@ class TestHarnessFidelity(unittest.TestCase):
         # proves the rewrite still covers the whole import block.
         result = run_scenario("toggle-construction")
         self.assertEqual(result["title"], "Sync Folder")
+
+    def test_harness_loads_the_shipped_extension_entry_point(self):
+        # The lifecycle scenarios import extension.js, whose relative
+        # './toggle.js' import the harness has to rebind by hand. A scenario
+        # that runs at all proves that rewrite is still current.
+        result = run_scenario("enable")
+        self.assertEqual(result["externalIndicators"], 1)
 
 
 if __name__ == "__main__":

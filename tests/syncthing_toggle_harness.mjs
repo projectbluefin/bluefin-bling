@@ -21,6 +21,7 @@ import {dirname, join} from 'node:path';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TOGGLE_JS = join(HERE, '..', 'extensions', 'syncthing-toggle', 'toggle.js');
+const EXTENSION_JS = join(HERE, '..', 'extensions', 'syncthing-toggle', 'extension.js');
 
 const IMPORT_LINE_RE =
     /^\s*import\s+(?:(\*\s+as\s+\w+)|(\{[^}]*\})|(\w+))\s+from\s+['"](?:gi:\/\/|resource:\/\/\/)[^'"]+['"];?\s*$/gm;
@@ -31,7 +32,12 @@ function loadToggleModule() {
     if (matches.length === 0)
         throw new Error('no gi:// or resource:/// imports found — harness rewrite is stale');
 
-    const rewritten = source.replace(
+    const url = asDataModule(rewriteGnomeImports(source));
+    return import(url);
+}
+
+function rewriteGnomeImports(source) {
+    return source.replace(
         IMPORT_LINE_RE,
         (_line, namespaceImport, namedImport, defaultImport) => {
             if (namespaceImport) {
@@ -46,8 +52,29 @@ function loadToggleModule() {
             return `const ${defaultImport} = globalThis.__stStubs.${defaultImport};`;
         },
     );
-    const url = `data:text/javascript;base64,${Buffer.from(rewritten, 'utf8').toString('base64')}`;
-    return import(url);
+}
+
+function asDataModule(source) {
+    return `data:text/javascript;base64,${Buffer.from(source, 'utf8').toString('base64')}`;
+}
+
+// extension.js is the entry point GNOME Shell calls, and the only place the
+// enable()/disable() lifecycle exists. It needs the same rewrite plus one more:
+// its relative `./toggle.js` import cannot resolve from a data: URL, so it is
+// bound to the toggle module this harness already loaded.
+const TOGGLE_IMPORT_RE =
+    /^\s*import\s+(\{[^}]*\})\s+from\s+['"]\.\/toggle\.js['"];?\s*$/gm;
+
+async function loadExtensionModule() {
+    globalThis.__stStubs.__toggle = await loadToggleModule();
+    const source = readFileSync(EXTENSION_JS, 'utf8');
+    if (!TOGGLE_IMPORT_RE.test(source))
+        throw new Error("extension.js no longer imports './toggle.js' — harness rewrite is stale");
+    const rewritten = rewriteGnomeImports(source).replace(
+        TOGGLE_IMPORT_RE,
+        (_line, named) => `const ${named} = globalThis.__stStubs.__toggle;`,
+    );
+    return import(asDataModule(rewritten));
 }
 
 // --- Stubs ------------------------------------------------------------------
@@ -104,15 +131,40 @@ class FakeQuickMenuToggle {
         this.checked = false;
         this.menu = new FakeMenu();
         this._handlers = new Map();
+        this._handlerIds = new Map();
+        this._nextHandlerId = 0;
+        this.destroyed = false;
     }
 
     connect(signal, callback) {
         this._handlers.set(signal, callback);
-        return this._handlers.size;
+        const id = ++this._nextHandlerId;
+        this._handlerIds.set(id, signal);
+        return id;
+    }
+
+    disconnect(id) {
+        const signal = this._handlerIds.get(id);
+        if (signal === undefined)
+            return;
+        this._handlerIds.delete(id);
+        this._handlers.delete(signal);
+    }
+
+    handlerCount() {
+        return this._handlerIds.size;
+    }
+
+    emit(signal) {
+        return this._handlers.get(signal)?.();
     }
 
     set(props) {
         Object.assign(this, props);
+    }
+
+    destroy() {
+        this.destroyed = true;
     }
 }
 
@@ -120,12 +172,20 @@ class FakeSystemIndicator {
     constructor() {
         this.quickSettingsItems = [];
         this._indicators = [];
+        // gnome-shell destroys the quick settings items and then the indicator,
+        // so ServiceIndicator.destroy() is reachable twice; this counts how
+        // often the base teardown actually ran.
+        this.superDestroyCount = 0;
     }
 
     _addIndicator() {
         const indicator = {visible: false, gicon: null};
         this._indicators.push(indicator);
         return indicator;
+    }
+
+    destroy() {
+        this.superDestroyCount += 1;
     }
 }
 
@@ -137,6 +197,14 @@ function makeStubs(options) {
         systemctl: [],
         statusSubprocesses: 0,
         errors: [],
+        // Every Gio.Subprocess.new(), with the cancellable it was handed and
+        // whether cancelling that cancellable actually killed the child.
+        subprocesses: [],
+        // GLib main-loop sources still installed, keyed by source id.
+        sources: new Map(),
+        nextSourceId: 1,
+        openPreferencesCalls: 0,
+        externalIndicators: [],
     };
 
     const settingsValues = {
@@ -158,33 +226,116 @@ function makeStubs(options) {
         },
     };
 
+    // What `systemctl status` reports. A successful start/stop moves it, so the
+    // status read the toggle does after every call sees the unit it just acted
+    // on rather than a frozen string.
+    let unitRunning = options.unitRunning ?? false;
+    const statusText = () =>
+        options.statusStdout ??
+        (unitRunning ? 'Active: active (running) since now' : 'Active: inactive (dead)');
+
     // _runSystemctl uses SubprocessFlags.NONE; checkStatus uses STDOUT_PIPE.
     // Splitting on the flag keeps the status command out of these assertions.
     function makeSubprocess(argv, flags) {
+        // Cancelling a Cancellable does not drop the pending callback: it still
+        // fires, with G_IO_ERROR_CANCELLED. The record also tracks force_exit,
+        // because the cancellable alone only abandons the local wait — the
+        // systemctl child keeps running unless the extension kills it.
+        const record = {argv, flags, cancellable: null, forcedExit: false};
+        log.subprocesses.push(record);
+        const proc = {
+            force_exit() {
+                record.forcedExit = true;
+            },
+        };
+
         if (flags === Gio.SubprocessFlags.STDOUT_PIPE) {
             log.statusSubprocesses += 1;
-            return {
-                communicate_utf8_async(_stdin, _cancellable, callback) {
+            return Object.assign(proc, {
+                communicate_utf8_async(_stdin, cancellable, callback) {
+                    record.cancellable = cancellable;
                     queueMicrotask(() => callback(this, 'res'));
                 },
                 communicate_utf8_finish() {
-                    return [true, options.statusStdout ?? '', ''];
+                    if (record.cancellable?.cancelled)
+                        throw new Error('Operation was cancelled');
+                    return [true, statusText(), ''];
                 },
-            };
+            });
         }
 
         log.systemctl.push(argv);
-        return {
-            wait_check_async(_cancellable, callback) {
+        return Object.assign(proc, {
+            wait_check_async(cancellable, callback) {
+                record.cancellable = cancellable;
                 queueMicrotask(() => callback(this, 'res'));
             },
             wait_check_finish() {
+                if (record.cancellable?.cancelled)
+                    throw new Error('Operation was cancelled');
                 if (options.systemctlFails)
                     throw new Error('systemctl failed');
+                if (argv[2] === 'start')
+                    unitRunning = true;
+                else if (argv[2] === 'stop')
+                    unitRunning = false;
                 return true;
             },
-        };
+        });
     }
+
+    class FakeCancellable {
+        constructor() {
+            this.cancelled = false;
+            this._handlers = new Map();
+            this._nextId = 0;
+        }
+
+        connect(callback) {
+            const id = ++this._nextId;
+            this._handlers.set(id, callback);
+            return id;
+        }
+
+        disconnect(id) {
+            this._handlers.delete(id);
+        }
+
+        cancel() {
+            if (this.cancelled)
+                return;
+            this.cancelled = true;
+            for (const callback of [...this._handlers.values()])
+                callback();
+        }
+
+        get handlerCount() {
+            return this._handlers.size;
+        }
+    }
+
+    const networkMonitor = {
+        metered: options.metered ?? false,
+        handlers: new Map(),
+        nextHandlerId: 0,
+        get_network_metered() {
+            return this.metered;
+        },
+        connect(signal, callback) {
+            const id = ++this.nextHandlerId;
+            this.handlers.set(id, {signal, callback});
+            return id;
+        },
+        disconnect(id) {
+            this.handlers.delete(id);
+        },
+        emit(signal) {
+            for (const handler of [...this.handlers.values()]) {
+                if (handler.signal === signal)
+                    handler.callback();
+            }
+        },
+    };
 
     const Gio = {
         SubprocessFlags: {NONE: 0, STDOUT_PIPE: 1},
@@ -194,6 +345,10 @@ function makeStubs(options) {
                     throw new Error('spawn refused');
                 return makeSubprocess(argv, flags);
             },
+        },
+        Cancellable: FakeCancellable,
+        NetworkMonitor: {
+            get_default: () => networkMonitor,
         },
         icon_new_for_string(name) {
             log.iconStrings.push(name);
@@ -213,17 +368,65 @@ function makeStubs(options) {
         },
     };
 
+    // Sources are recorded, never armed: the scenarios fire the callback
+    // themselves, so a poll interval change cannot slow the suite down.
+    const GLib = {
+        PRIORITY_DEFAULT: 0,
+        SOURCE_REMOVE: false,
+        SOURCE_CONTINUE: true,
+        timeout_add_seconds(_priority, seconds, callback) {
+            const id = log.nextSourceId++;
+            log.sources.set(id, {seconds, callback});
+            return id;
+        },
+        Source: {
+            remove(id) {
+                log.sources.delete(id);
+            },
+        },
+    };
+
     const Main = {
         notify(title, body) {
             log.notifications.push({title, body});
         },
         sessionMode: {allowSettings: options.allowSettings ?? true},
+        panel: {
+            statusArea: {
+                quickSettings: {
+                    addExternalIndicator(indicator) {
+                        log.externalIndicators.push(indicator);
+                    },
+                },
+            },
+        },
     };
+
+    // extension.js extends Extension and is constructed by the shell with no
+    // arguments, so the stub supplies the same surface makeExtensionObject does.
+    class FakeExtension {
+        constructor() {
+            this.uuid = 'syncthing-toggle@projectbluefin.io';
+            this.path =
+                options.extensionPath ??
+                '/usr/share/gnome-shell/extensions/syncthing-toggle';
+        }
+
+        getSettings() {
+            return settings;
+        }
+
+        openPreferences() {
+            log.openPreferencesCalls += 1;
+        }
+    }
 
     const stubs = {
         Gio,
+        GLib,
         GObject,
         Main,
+        Extension: FakeExtension,
         PopupMenu: {
             PopupMenuSection: FakePopupMenuSection,
             PopupSeparatorMenuItem: FakePopupSeparatorMenuItem,
@@ -233,7 +436,7 @@ function makeStubs(options) {
         gettext: text => text,
     };
 
-    return {stubs, log, settings};
+    return {stubs, log, settings, networkMonitor};
 }
 
 function makeExtensionObject(settings, options) {
@@ -268,6 +471,42 @@ async function build(options) {
     const extension = makeExtensionObject(settings, options);
     const indicator = new module.ServiceIndicator(extension.object);
     return {indicator, log, extensionLog: extension.log};
+}
+
+// Drive the real entry point instead of constructing the indicator directly:
+// enable()/disable() live in extension.js and are the only place the lifecycle
+// — the initial reconcile, the poll source, the teardown — can be observed.
+async function buildExtension(options) {
+    const {stubs, log, networkMonitor} = makeStubs(options);
+    globalThis.__stStubs = stubs;
+    globalThis.logError = (...args) => log.errors.push(args.map(String));
+
+    const module = await loadExtensionModule();
+    const extension = new module.default();
+    extension.enable();
+    await settle();
+    return {extension, indicator: extension._indicator, log, networkMonitor};
+}
+
+// The single installed poll source. Reported rather than asserted on here so an
+// extension that installs none produces a failing report, not a crash.
+function pollSource(log) {
+    const [id] = [...log.sources.keys()];
+    if (id === undefined)
+        return {id: null, seconds: 0, callback: () => null};
+    return {id, ...log.sources.get(id)};
+}
+
+function toggleState(indicator) {
+    return {
+        checked: indicator._toggle.checked,
+        subtitle: indicator._toggle.subtitle,
+        indicatorVisible: indicator._indicator.visible,
+    };
+}
+
+function verbs(log) {
+    return log.subprocesses.filter(call => call.argv[0] === 'systemctl').map(call => call.argv[2]);
 }
 
 const scenarios = {
@@ -350,6 +589,245 @@ const scenarios = {
             statusSubprocesses: log.statusSubprocesses,
             errors: log.errors,
         };
+    },
+
+    // enable() reconciles once: it reads the unit state nobody clicked, and —
+    // because notify::network-metered only fires on a *change* — checks the
+    // current metered state itself. A session that starts on mobile data with
+    // the unit enabled from last time gets no signal at all.
+    async 'enable'(options) {
+        const {indicator, log} = await buildExtension(options);
+        const source = pollSource(log);
+        return {
+            verbs: verbs(log),
+            statusSubprocesses: log.statusSubprocesses,
+            notifications: log.notifications,
+            toggle: toggleState(indicator),
+            installedSources: log.sources.size,
+            pollSeconds: source.seconds,
+            programs: [...new Set(log.subprocesses.map(call => call.argv[0]))],
+            externalIndicators: log.externalIndicators.length,
+            errors: log.errors,
+        };
+    },
+
+    // The unit can be started or stopped by anything on the system, so the
+    // toggle re-reads it on a timer instead of trusting its own last click.
+    async 'poll-tick'(options) {
+        // One options object, mutated in place: the stubs read it lazily, so
+        // the scenario can move the world between phases.
+        const opts = {...options, unitRunning: true};
+        const {indicator, log} = await buildExtension(opts);
+        const before = toggleState(indicator);
+        const source = pollSource(log);
+
+        // The unit dies behind the extension's back.
+        opts.statusStdout = 'Active: inactive (dead)';
+        log.statusSubprocesses = 0;
+        const returnValue = source.callback();
+        await settle();
+        return {before, returnValue, statusSubprocesses: log.statusSubprocesses, after: toggleState(indicator)};
+    },
+
+    // disable() must leave nothing that can fire against torn-down widgets:
+    // no source, no signal handlers, and no subprocess a late callback spawns.
+    async 'disable'(options) {
+        const {extension, indicator, log, networkMonitor} = await buildExtension({
+            ...options,
+            unitRunning: true,
+        });
+        const source = pollSource(log);
+        const toggle = indicator._toggle;
+        const cancellable = indicator._cancellable;
+
+        extension.disable();
+        log.subprocesses.length = 0;
+        log.notifications.length = 0;
+
+        // A stale tick, a late click and a late metered signal all arrive after
+        // teardown in a real session.
+        const staleTimerReturn = source.callback();
+        toggle.emit('clicked');
+        networkMonitor.metered = true;
+        networkMonitor.emit('notify::network-metered');
+        await settle();
+
+        let secondDestroyError = null;
+        try {
+            indicator.destroy();
+        } catch (error) {
+            secondDestroyError = String(error?.message ?? error);
+        }
+
+        return {
+            liveSources: log.sources.size,
+            networkMonitorHandlers: networkMonitor.handlers.size,
+            toggleHandlers: toggle.handlerCount(),
+            cancellableCancelled: Boolean(cancellable?.cancelled),
+            superDestroyCount: indicator.superDestroyCount,
+            staleTimerReturn,
+            subprocessesAfterDisable: log.subprocesses.map(call => call.argv),
+            notificationsAfterDisable: log.notifications,
+            secondDestroyError,
+        };
+    },
+
+    // enable()'s status read is still in flight when disable() lands.
+    async 'cancellation'(options) {
+        const {stubs, log, networkMonitor} = makeStubs({...options, unitRunning: true});
+        globalThis.__stStubs = stubs;
+        globalThis.logError = (...args) => log.errors.push(args.map(String));
+
+        const module = await loadExtensionModule();
+        const extension = new module.default();
+        extension.enable();
+        // No settle(): the subprocess callbacks are still queued.
+        const inFlight = log.subprocesses.length;
+        const indicator = extension._indicator;
+        const cancellable = indicator._cancellable;
+        const subtitleBefore = indicator._toggle.subtitle;
+
+        extension.disable();
+        await settle();
+
+        return {
+            inFlightAtDisable: inFlight,
+            everyCallCancellable:
+                log.subprocesses.length > 0 &&
+                log.subprocesses.every(call => Boolean(call.cancellable)),
+            // A Cancellable only abandons the local wait; the systemctl child
+            // survives unless cancellation is wired to force_exit().
+            everySubprocessForcedExit:
+                log.subprocesses.length > 0 &&
+                log.subprocesses.every(call => call.forcedExit === true),
+            cancellableHandlersLeft: cancellable ? cancellable.handlerCount : -1,
+            subtitleBefore,
+            subtitleAfter: indicator._toggle.subtitle,
+            indicatorVisible: indicator._indicator.visible,
+            notifications: log.notifications,
+            networkMonitorHandlers: networkMonitor.handlers.size,
+        };
+    },
+
+    // Turning the toggle on over a metered connection is refused before
+    // anything is spawned.
+    async 'metered-click'(options) {
+        const {indicator, log} = await buildExtension({...options, metered: true});
+        log.subprocesses.length = 0;
+        log.systemctl.length = 0;
+        log.notifications.length = 0;
+
+        indicator._toggle.checked = true;
+        await indicator._toggle.emit('clicked');
+        await settle();
+        return {
+            systemctl: log.systemctl,
+            checked: indicator._toggle.checked,
+            notifications: log.notifications,
+        };
+    },
+
+    // Going metered while the unit runs pauses it, and the pause is announced
+    // only once the unit is really down.
+    async 'metered-signal'(options) {
+        const {extension, indicator, log, networkMonitor} = await buildExtension({
+            ...options,
+            unitRunning: true,
+        });
+        log.subprocesses.length = 0;
+        log.notifications.length = 0;
+
+        // An unmetered notify must not stop anything.
+        networkMonitor.emit('notify::network-metered');
+        await settle();
+        const whileUnmetered = verbs(log);
+
+        networkMonitor.metered = true;
+        log.subprocesses.length = 0;
+        networkMonitor.emit('notify::network-metered');
+        await settle();
+
+        const result = {
+            whileUnmetered,
+            whenMetered: verbs(log),
+            notifications: log.notifications,
+            toggle: toggleState(indicator),
+            errors: log.errors,
+        };
+
+        extension.disable();
+        log.subprocesses.length = 0;
+        networkMonitor.emit('notify::network-metered');
+        await settle();
+        result.afterDisable = verbs(log);
+        return result;
+    },
+
+    // disable() lands in the window between a systemctl call that succeeded and
+    // the notification it would justify.
+    async 'disable-mid-click'(options) {
+        const {extension, indicator, log} = await buildExtension(options);
+        log.subprocesses.length = 0;
+        log.systemctl.length = 0;
+        log.notifications.length = 0;
+        log.statusSubprocesses = 0;
+
+        indicator._toggle.checked = true;
+        const clicked = indicator._toggle.emit('clicked');
+        // Wait for `start` to have succeeded and the status re-read to be in
+        // flight, then tear the extension down under it.
+        for (let i = 0; i < 50 && log.statusSubprocesses === 0; i++)
+            await Promise.resolve();
+        const startedBeforeDisable = log.systemctl.map(argv => argv[2]);
+        extension.disable();
+        await clicked;
+        await settle();
+
+        return {
+            startedBeforeDisable,
+            systemctl: log.systemctl,
+            notifications: log.notifications,
+            subtitle: indicator._toggle.subtitle,
+        };
+    },
+
+    // systemctl can refuse: a missing unit, a masked unit, a failing ExecStart.
+    // Announcing the new state before the call means claiming "sharing enabled"
+    // for a service that never came up, and `enable` would make it stick.
+    async 'failed-start'(options) {
+        const {indicator, log} = await buildExtension(options);
+        log.subprocesses.length = 0;
+        log.systemctl.length = 0;
+        log.notifications.length = 0;
+        log.errors.length = 0;
+
+        options.systemctlFails = true;
+        indicator._toggle.checked = true;
+        await indicator._toggle.emit('clicked');
+        await settle();
+        return {
+            verbs: verbs(log),
+            notifications: log.notifications,
+            toggle: toggleState(indicator),
+            errors: log.errors,
+        };
+    },
+
+    // The same rule on the metered path. Saying "paused" while the unit keeps
+    // replicating is worse than silence: the user reads it as "safe to stay on
+    // mobile data", which is the one thing the guard exists to prevent.
+    async 'failed-metered-stop'(options) {
+        const opts = {...options, unitRunning: true};
+        const {log, networkMonitor} = await buildExtension(opts);
+        log.subprocesses.length = 0;
+        log.notifications.length = 0;
+        log.errors.length = 0;
+
+        opts.systemctlFails = true;
+        networkMonitor.metered = true;
+        networkMonitor.emit('notify::network-metered');
+        await settle();
+        return {verbs: verbs(log), notifications: log.notifications, errors: log.errors};
     },
 };
 

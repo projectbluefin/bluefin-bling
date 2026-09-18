@@ -39,8 +39,11 @@ metadata:
 python3 -m unittest discover -s tests -t tests -v
 ```
 
-Standard library only — no `pip install`, no `package.json`. `node` is used via
-`node --check`, and the syntax test skips itself if `node` is absent.
+Standard library only — no `pip install`, no `package.json`. `node` is required
+for the parts of the suite that execute JavaScript: `node --check` on every
+source, and the behavioural harnesses below. All of them **skip silently when
+`node` is absent**, so a green local run on a machine without node has proven
+far less than it looks — CI installs node for this reason.
 
 Pull requests and pushes to `main` are validated automatically by CI
 (`.github/workflows/ci.yml`). Run the suite above locally before opening a PR,
@@ -154,6 +157,34 @@ any file a new extension added was silently never checked.
   accepts valid systemd unit names and rejects malformed ones and command-injection
   payloads. `SECURITY.md` depends on the invariant it guards — do not weaken it
   without updating that file too
+
+## Behavioural harnesses
+
+The checks above read source text. A harness instead *runs* the shipped source:
+`tests/syncthing_toggle_harness.mjs` and `tests/power_status_color_harness.mjs`
+read the real `.js` file, rewrite **only** its `gi://` and
+`resource:///org/gnome/shell/…` import block into bindings taken from
+`globalThis`, and import the result as a base64 `data:` module. Everything below
+the import block — the logic under test — executes byte-for-byte as shipped.
+Each harness takes a scenario name and a JSON options blob on argv and prints a
+single JSON object describing what the extension did; the matching
+`tests/test_*_behavior.py` asserts on that JSON.
+
+The stubs record observable effects — spawned argv, `Main.notify()` calls,
+launched URIs, indicator visibility, subtitle text — so the tests assert what a
+user or the system would see, never source text. Adding a scenario means adding
+one entry to the `scenarios` object plus the assertions for it.
+
+Two rules keep these honest:
+
+- **One harness per module.** A second harness over the same source splits the
+  stub surface in two and the halves drift: a behaviour proved in one is not
+  proved in the other, and a reviewer cannot tell which is authoritative. Append
+  a scenario to the existing harness instead of starting a rival.
+- **Mutate the source to prove a scenario bites.** Every scenario here was
+  checked by breaking the extension on purpose — deleting the reconcile call at
+  `enable()`, hoisting the notification above the `systemctl` result — and
+  confirming the suite went red.
 
 ## Extending the suite
 
