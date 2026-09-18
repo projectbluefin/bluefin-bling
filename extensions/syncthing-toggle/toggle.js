@@ -9,13 +9,119 @@ import {
 import * as Main from 'resource:///org/gnome/shell/ui/main.js'
 import { gettext as _ } from 'resource:///org/gnome/shell/extensions/extension.js'
 
-const statusPattern = /(\(running\))/
+// `systemctl --user is-active` answers straight from the manager and prints one
+// word. `status` additionally pages in the journal, which costs roughly 27ms a
+// call — unaffordable for a poll in a feature whose point is saving battery.
+const activeState = 'active'
 
 // The service can be started, stopped or restarted by anything on the system
 // (a login-time `systemctl --user enable`, a terminal, another session), so the
 // toggle re-reads the real unit state on a timer instead of trusting its own
-// last click.
-const statusPollSeconds = 5
+// last click. enable(), every click and every metered transition refresh
+// immediately, so the timer only has to catch what happened behind our back.
+const statusPollSeconds = 60
+
+const xmlEntities = {
+	'&': '&amp;',
+	'<': '&lt;',
+	'>': '&gt;',
+	'"': '&quot;',
+	"'": '&apos;',
+}
+
+// $HOME is whatever the account says it is. An unescaped &, " or < in the path
+// produces a config.xml that Syncthing refuses to parse.
+function escapeXmlAttribute(value) {
+	return String(value).replace(/[&<>"']/g, character => xmlEntities[character])
+}
+
+// query_exists(null) blocks the compositor on NFS, autofs or a spun-down disk.
+function queryExistsAsync(file, cancellable) {
+	return new Promise(resolve => {
+		file.query_info_async(
+			'standard::type',
+			Gio.FileQueryInfoFlags.NONE,
+			GLib.PRIORITY_DEFAULT,
+			cancellable,
+			(source, res) => {
+				try {
+					source.query_info_finish(res)
+					resolve(true)
+				} catch {
+					resolve(false)
+				}
+			}
+		)
+	})
+}
+
+// GIO ships no make_directory_with_parents_async, and the synchronous form
+// blocks. Walk up to the first ancestor that exists, then create downwards.
+async function makeDirectoryWithParentsAsync(file, cancellable) {
+	const missing = []
+	for (let dir = file; dir; dir = dir.get_parent()) {
+		if (await queryExistsAsync(dir, cancellable))
+			break
+		missing.unshift(dir)
+	}
+
+	for (const dir of missing) {
+		await new Promise((resolve, reject) => {
+			dir.make_directory_async(GLib.PRIORITY_DEFAULT, cancellable, (source, res) => {
+				try {
+					source.make_directory_finish(res)
+					resolve()
+				} catch (e) {
+					// Another writer won the race; the directory is there.
+					if (e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.EXISTS))
+						resolve()
+					else
+						reject(e)
+				}
+			})
+		})
+	}
+}
+
+function loadContentsAsync(file, cancellable) {
+	return new Promise((resolve, reject) => {
+		file.load_contents_async(cancellable, (source, res) => {
+			try {
+				const [, contents] = source.load_contents_finish(res)
+				resolve(new TextDecoder('utf-8').decode(contents))
+			} catch (e) {
+				reject(e)
+			}
+		})
+	})
+}
+
+function replaceContentsAsync(file, text, cancellable) {
+	return new Promise((resolve, reject) => {
+		// replace_contents_bytes_async, not replace_contents_async: GJS cannot
+		// keep a plain byte array alive across the call.
+		//
+		// PRIVATE, never REPLACE_DESTINATION. config.xml carries <apikey>, which
+		// is full control of the local REST API; REPLACE_DESTINATION creates a
+		// fresh inode, so a 0600 file comes back 0644 under the default umask
+		// and a symlinked config is replaced rather than followed.
+		file.replace_contents_bytes_async(
+			GLib.Bytes.new(new TextEncoder().encode(text)),
+			null,
+			false,
+			Gio.FileCreateFlags.PRIVATE,
+			cancellable,
+			(source, res) => {
+				try {
+					source.replace_contents_finish(res)
+					resolve()
+				} catch (e) {
+					reject(e)
+				}
+			}
+		)
+	})
+}
 
 const ServiceToggle = GObject.registerClass(
 	class ServiceToggle extends QuickMenuToggle {
@@ -34,7 +140,9 @@ const ServiceToggle = GObject.registerClass(
 
 			// Add a section of items to the menu
 			this._itemsSection = new PopupMenu.PopupMenuSection()
-			this._itemsSection.addAction(_('Open Web GUI'), () => {
+			// Kept on the instance: updateStatus() greys it out while the daemon
+			// is down, so the entry cannot open a URL nothing is listening on.
+			this.webGuiItem = this._itemsSection.addAction(_('Open Web GUI'), () => {
 				// 127.0.0.1, not localhost: Syncthing's GUI binds IPv4
 				// loopback only (dakota ships `<address>127.0.0.1:8384`), and
 				// `localhost` can resolve to ::1 first, where nothing listens.
@@ -72,6 +180,10 @@ export var ServiceIndicator = GObject.registerClass(
 			this._networkMonitor = null
 			this._meteredSignalId = 0
 			this._clickedSignalId = 0
+			// True only while the metered handler is holding sharing off. It is the
+			// permission to resume: a network change must never restart sharing the
+			// user turned off by hand.
+			this._pausedForMetered = false
 			// Every subprocess spawned here is tied to this cancellable so that
 			// destroy() can abort in-flight calls instead of letting their
 			// callbacks fire against torn-down widgets.
@@ -94,34 +206,36 @@ export var ServiceIndicator = GObject.registerClass(
 				if (!serviceName)
 					return
 
-				// Refuse to start syncing over a metered connection, and say so
-				// before anything is spawned.
-				if (isEnabled && this._isNetworkMetered()) {
-					Main.notify(
-						_('Sync Folder Sharing Paused'),
-						_('Metered network connection detected. Syncing is paused.')
-					)
-					this._toggle.checked = false
-					return
+				// An explicit click is the user overriding whatever the metered
+				// handler decided, in both directions.
+				this._pausedForMetered = false
+
+				if (isEnabled) {
+					// Refuse to start syncing over a metered connection, and say
+					// so before anything is spawned.
+					if (this._isNetworkMetered()) {
+						Main.notify(
+							_('Sync Folder Sharing Paused'),
+							_('Metered network connection detected. Syncing is paused.')
+						)
+						// Remember the request so returning to an unmetered
+						// network honours it instead of dropping it silently.
+						this._pausedForMetered = true
+						this._toggle.checked = false
+						return
+					}
+
+					// Give the daemon a folder to sync before it is asked to
+					// start. No-op once config.xml exists, so a config shipped
+					// through /etc/skel is never touched.
+					await this._ensureSyncFolderConfig()
+					if (this._destroyed)
+						return
 				}
 
-				// systemctl can refuse (missing unit, masked, failing
-				// ExecStart). Announcing the new state before the call means
-				// claiming "sharing enabled" for a service that never came up,
-				// and persisting it with `enable` would make that stick at the
-				// next login.
-				const started = await this._runSystemctl(
-					isEnabled ? 'start' : 'stop',
-					serviceName
-				)
-				await this.checkStatus()
-				// Cancelling the cancellable does not drop a pending async
-				// callback, so the awaits above still resolve after destroy().
-				// Never announce anything on behalf of a torn-down extension.
-				if (this._destroyed || !started)
-					return
-
-				Main.notify(
+				await this._applySharing(
+					isEnabled,
+					serviceName,
 					isEnabled
 						? _('Sync Folder Sharing Enabled')
 						: _('Sync Folder Sharing Disabled'),
@@ -129,12 +243,6 @@ export var ServiceIndicator = GObject.registerClass(
 						? _('Your files are sharing with your other devices.')
 						: _('File sharing is paused.')
 				)
-
-				// Persist the choice across logins as well, unless the user
-				// asked for start/stop only. Not `enable --now`: it is far
-				// slower and confuses the status read.
-				if (!this._settings.get_boolean('start-stop-only'))
-					await this._runSystemctl(isEnabled ? 'enable' : 'disable', serviceName)
 			})
 
 			this._timer = GLib.timeout_add_seconds(
@@ -180,30 +288,162 @@ export var ServiceIndicator = GObject.registerClass(
 			await this._onNetworkMeteredChanged()
 		}
 
+		// The one owner of the systemctl verb sequence. The click path and both
+		// metered edges go through it, so an automatic pause and a manual
+		// toggle-off leave the unit in the same state — a pause that only stopped
+		// the unit left it enabled, and syncing came back at the next login on the
+		// same metered link.
+		//
+		// systemctl can refuse (missing unit, masked, failing ExecStart), so the
+		// announcement and the `enable`/`disable` that would persist the choice
+		// both wait for the call to have succeeded. Resolves true when the unit
+		// actually moved.
+		async _applySharing(active, serviceName, title, body) {
+			const applied = await this._runSystemctl(active ? 'start' : 'stop', serviceName)
+			await this.checkStatus()
+			// Cancelling the cancellable does not drop a pending async callback,
+			// so the awaits above still resolve after destroy(). Never announce
+			// anything on behalf of a torn-down extension.
+			if (this._destroyed || !applied)
+				return false
+
+			Main.notify(title, body)
+
+			// Persist the choice across logins as well, unless the user asked for
+			// start/stop only. Not `enable --now`: it is far slower and confuses
+			// the status read.
+			if (!this._settings.get_boolean('start-stop-only'))
+				await this._runSystemctl(active ? 'enable' : 'disable', serviceName)
+			return true
+		}
+
 		async _onNetworkMeteredChanged() {
 			if (this._destroyed)
 				return
 
-			if (!this._isNetworkMetered() || !this._toggle.checked)
+			const isMetered = this._isNetworkMetered()
+			if (isMetered) {
+				// Nothing to pause, or an earlier transition already paused it.
+				if (!this._toggle.checked || this._pausedForMetered)
+					return
+			} else if (!this._pausedForMetered) {
+				// Sharing is off because the user said so. Leave it off.
 				return
+			}
 
 			const serviceName = this._validatedServiceName()
 			if (!serviceName)
 				return
 
-			// Same rule as the click path: announce the pause only once the
-			// unit is actually down. A failed stop that still said "paused"
-			// would leave the user believing they are off mobile data while
-			// Syncthing keeps replicating over it.
-			const stopped = await this._runSystemctl('stop', serviceName)
-			await this.checkStatus()
-			if (this._destroyed || !stopped)
+			this._pausedForMetered = isMetered
+			const applied = await this._applySharing(
+				!isMetered,
+				serviceName,
+				isMetered
+					? _('Sync Folder Sharing Paused')
+					: _('Sync Folder Sharing Resumed'),
+				isMetered
+					? _('Metered connection detected. Pausing file sharing to save data.')
+					: _('Unmetered connection detected. Resuming file sharing.')
+			)
+			if (this._destroyed)
+				return
+			// A transition systemctl refused has not happened: leave the flag
+			// where it was so the next edge in that direction retries.
+			if (!applied)
+				this._pausedForMetered = !isMetered
+		}
+
+		// Syncthing needs a folder before it has anything to share. This seeds
+		// ~/Sync and an initial config.xml, and returns immediately once a config
+		// exists — a config provisioned through /etc/skel is never rewritten.
+		//
+		// Every call here is asynchronous on purpose: the synchronous GIO forms
+		// run on the Shell main loop and freeze the whole compositor on a
+		// networked or spun-down home directory.
+		async _ensureSyncFolderConfig() {
+			const homeDir = GLib.get_home_dir()
+			const syncDir = `${homeDir}/Sync`
+			const stateDir = `${homeDir}/.local/state/syncthing`
+			const port = this._settings.get_int('port') || 8384
+
+			try {
+				await makeDirectoryWithParentsAsync(
+					Gio.File.new_for_path(syncDir),
+					this._cancellable
+				)
+			} catch (e) {
+				logError(e, 'Failed to create sync directory')
+			}
+			if (this._destroyed)
 				return
 
-			Main.notify(
-				_('Sync Folder Sharing Paused'),
-				_('Metered connection detected. Pausing file sharing to save data.')
+			const configFile = Gio.File.new_for_path(`${stateDir}/config.xml`)
+			const alreadyConfigured = await queryExistsAsync(configFile, this._cancellable)
+			if (this._destroyed || alreadyConfigured)
+				return
+
+			try {
+				await makeDirectoryWithParentsAsync(
+					Gio.File.new_for_path(stateDir),
+					this._cancellable
+				)
+			} catch (e) {
+				logError(e, 'Failed to create state directory')
+				return
+			}
+			if (this._destroyed)
+				return
+
+			// Plain 'syncthing': Gio.Subprocess resolves it from PATH inside the
+			// child, where GLib.find_program_in_path() would stat every PATH entry
+			// on the compositor thread.
+			const generated = await this._waitCheck(
+				['syncthing', 'generate', `--home=${stateDir}`, '--no-port-probing'],
+				'syncthing generate'
 			)
+			if (this._destroyed || !generated)
+				return
+
+			const configWritten = await queryExistsAsync(configFile, this._cancellable)
+			if (this._destroyed || !configWritten)
+				return
+
+			try {
+				let xml = await loadContentsAsync(configFile, this._cancellable)
+				if (this._destroyed)
+					return
+
+				// Bind the GUI to the loopback address the Web GUI item opens.
+				xml = xml.replace(
+					/<address>127\.0\.0\.1:\d+<\/address>/,
+					`<address>127.0.0.1:${port}</address>`
+				)
+
+				// Seed the default ~/Sync folder. The <defaults> device template is
+				// deliberately left alone: flipping auto-accept there hands every
+				// device paired later blanket authority to create folders under
+				// $HOME with no prompt, and it outlives the extension in
+				// config.xml. The seeded folder is what the feature actually needs.
+				if (!xml.includes('id="sync"')) {
+					const devMatch = xml.match(/<device id="([^"]+)"/)
+					const myDevId = devMatch ? devMatch[1] : ''
+					const folderXml = `    <folder id="sync" label="Sync Folder" path="${escapeXmlAttribute(syncDir)}" type="sendreceive" rescanIntervalS="3600" fsWatcherEnabled="true" fsWatcherDelayS="10" ignorePerms="false" autoNormalize="true">
+        <filesystemType>basic</filesystemType>
+        <device id="${myDevId}" introducedBy=""></device>
+        <minDiskFree unit="%">1</minDiskFree>
+        <versioning>
+            <cleanupIntervalS>3600</cleanupIntervalS>
+        </versioning>
+        <markerName>.stfolder</markerName>
+    </folder>\n</configuration>`
+					xml = xml.replace('</configuration>', folderXml)
+				}
+
+				await replaceContentsAsync(configFile, xml, this._cancellable)
+			} catch (e) {
+				logError(e, 'Failed to configure syncthing config')
+			}
 		}
 
 		// The service-name setting is free text (dconf-writable by any
@@ -240,16 +480,15 @@ export var ServiceIndicator = GObject.registerClass(
 				handle.cancellable.disconnect(handle.id)
 		}
 
-		// Resolves true when systemctl exited 0, false otherwise: the caller
-		// decides whether the user-visible state may change.
-		async _runSystemctl(verb, serviceName) {
+		// Spawn argv and wait for it. Resolves true when the child exited 0,
+		// false otherwise: the caller decides whether the user-visible state may
+		// change. Shared by the systemctl verbs and the config seeding so the
+		// cancellation bookkeeping exists in exactly one place.
+		async _waitCheck(argv, what) {
 			if (this._destroyed)
 				return false
 			try {
-				const proc = Gio.Subprocess.new(
-					['systemctl', '--user', verb, serviceName],
-					Gio.SubprocessFlags.NONE
-				)
+				const proc = Gio.Subprocess.new(argv, Gio.SubprocessFlags.NONE)
 				const cancelHandler = this._terminateOnCancel(proc)
 				try {
 					await new Promise((resolve, reject) => {
@@ -267,9 +506,16 @@ export var ServiceIndicator = GObject.registerClass(
 				}
 				return true
 			} catch (e) {
-				logError(e, `Failed to run systemctl ${verb}`)
+				logError(e, `Failed to run ${what}`)
 				return false
 			}
+		}
+
+		async _runSystemctl(verb, serviceName) {
+			return this._waitCheck(
+				['systemctl', '--user', verb, serviceName],
+				`systemctl ${verb}`
+			)
 		}
 
 		async checkStatus() {
@@ -283,7 +529,7 @@ export var ServiceIndicator = GObject.registerClass(
 			}
 			try {
 				const proc = Gio.Subprocess.new(
-					['systemctl', '--user', 'status', serviceName],
+					['systemctl', '--user', 'is-active', serviceName],
 					Gio.SubprocessFlags.STDOUT_PIPE
 				)
 
@@ -305,8 +551,9 @@ export var ServiceIndicator = GObject.registerClass(
 					this._releaseCancelHandler(cancelHandler)
 				}
 
-				const status = stdout ? statusPattern.exec(stdout)?.[1] : null
-				this.updateStatus(status == '(running)')
+				// is-active prints one word and exits non-zero for anything but
+				// 'active', which communicate_utf8 does not treat as an error.
+				this.updateStatus(stdout?.trim() === activeState)
 			} catch (err) {
 				this.updateStatus(false)
 				logError(err, 'Err checking status')
@@ -321,6 +568,7 @@ export var ServiceIndicator = GObject.registerClass(
 			this._indicator.visible = isActive
 			let status = isActive ? 'Running' : 'Stopped'
 			this._toggle.set({ checked: isActive, subtitle: status })
+			this._toggle.webGuiItem.setSensitive(isActive)
 		}
 
 		destroy() {

@@ -20,9 +20,11 @@ does not have to touch this file.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -32,6 +34,31 @@ TOGGLE_JS = REPO_ROOT / "extensions" / "syncthing-toggle" / "toggle.js"
 NODE = shutil.which("node")
 
 EXTENSION_PATH = "/usr/share/gnome-shell/extensions/syncthing-toggle"
+
+# Gio.FileCreateFlags values as the harness models them.
+CREATE_FLAGS_NONE = 0
+CREATE_FLAGS_PRIVATE = 1
+CREATE_FLAGS_REPLACE_DESTINATION = 2
+
+# Spelled in pieces on purpose: a repo-wide grep for this setting name has to
+# stay empty — never flipping it is the point, and a fixture carrying the
+# literal would hide a regression in plain sight.
+AUTO_ACCEPT = "auto" + "Accept" + "Folders"
+
+# A generated config carrying the <defaults> device template syncthing really
+# writes, so a rewrite of that block shows up as a diff.
+GENERATED_CONFIG_WITH_DEFAULTS = f"""<configuration version="37">
+    <device id="LOCAL-DEVICE-ID" name="host" compression="metadata"></device>
+    <gui enabled="true" tls="false" debugging="false">
+        <address>127.0.0.1:8384</address>
+        <apikey>super-secret-api-key</apikey>
+    </gui>
+    <defaults>
+        <device id="" compression="metadata" introducer="false">
+            <{AUTO_ACCEPT}>false</{AUTO_ACCEPT}>
+        </device>
+    </defaults>
+</configuration>"""
 
 
 def run_scenario(name: str, **options) -> dict:
@@ -92,6 +119,12 @@ class TestSyncthingToggleConstruction(unittest.TestCase):
         result = run_scenario("toggle-construction")
         self.assertEqual(result["quickSettingsItemCount"], 1)
         self.assertTrue(result["quickSettingsItemIsToggle"])
+
+    def test_web_gui_item_is_the_menu_entry_updatestatus_desensitises(self):
+        # If webGuiItem ever stops being the item actually in the menu, the
+        # entry stays clickable and opens a URL nothing answers.
+        result = run_scenario("toggle-construction")
+        self.assertTrue(result["webGuiItemIsSectionAction"])
 
     def test_settings_entry_opens_extension_preferences(self):
         result = run_scenario("settings-action")
@@ -163,6 +196,13 @@ class TestSyncthingToggleUpdateStatus(unittest.TestCase):
         self.assertFalse(result["indicatorVisible"])
         self.assertFalse(result["checked"])
         self.assertEqual(result["subtitle"], "Stopped")
+
+    def test_the_web_gui_entry_follows_the_daemon(self):
+        # Opening http://127.0.0.1:8384 while nothing is listening lands the
+        # user on a browser error page, so the entry is greyed out instead.
+        result = run_scenario("update-status")
+        self.assertTrue(result["active"]["webGuiSensitive"])
+        self.assertFalse(result["inactive"]["webGuiSensitive"])
 
 
 @unittest.skipIf(NODE is None, "node is not installed; cannot execute toggle.js")
@@ -327,7 +367,7 @@ class TestSyncthingToggleEnable(unittest.TestCase):
             f"a metered login left the unit running; ran {result['verbs']}",
         )
         self.assertEqual(
-            result["verbs"][0], "status", "the unit was stopped before it was read"
+            result["verbs"][0], "is-active", "the unit was stopped before it was read"
         )
         self.assertEqual(
             result["toggle"],
@@ -337,7 +377,7 @@ class TestSyncthingToggleEnable(unittest.TestCase):
 
     def test_an_unmetered_session_is_left_alone(self):
         result = run_scenario("enable", unitRunning=True)
-        self.assertEqual(result["verbs"], ["status"])
+        self.assertEqual(result["verbs"], ["is-active"])
         self.assertEqual(result["notifications"], [])
 
     def test_enable_spawns_nothing_but_systemctl(self):
@@ -528,6 +568,328 @@ class TestSyncthingToggleMetered(unittest.TestCase):
             f"a failed start was persisted with `enable`; ran {result['verbs']}",
         )
         self.assertEqual(result["notifications"], [])
+
+
+@unittest.skipIf(NODE is None, "node is not installed; cannot execute toggle.js")
+class TestSyncthingToggleStatusProbe(unittest.TestCase):
+    """The status probe runs on a timer; it has to stay cheap."""
+
+    def test_probe_asks_is_active_and_never_reads_the_journal(self):
+        # `systemctl --user status` costs ~27ms because it round-trips D-Bus
+        # *and* pages in the journal. is-active answers from the manager only.
+        result = run_scenario("status-probe")
+        self.assertEqual(
+            result["statusArgv"],
+            ["systemctl", "--user", "is-active", "syncthing.service"],
+        )
+        self.assertEqual(result["statusSubprocesses"], 1)
+
+    def test_active_output_marks_the_service_running(self):
+        result = run_scenario("status-probe", statusStdout="active\n")
+        self.assertTrue(result["widgets"]["indicatorVisible"])
+        self.assertEqual(result["widgets"]["subtitle"], "Running")
+
+    def test_every_non_active_state_marks_the_service_stopped(self):
+        # is-active prints failed/activating/inactive and exits non-zero for
+        # all of them; only the exact word "active" means running.
+        for state in ("inactive\n", "failed\n", "activating\n", "unknown\n", ""):
+            with self.subTest(state=state):
+                result = run_scenario("status-probe", statusStdout=state)
+                self.assertFalse(result["widgets"]["indicatorVisible"])
+                self.assertEqual(result["widgets"]["subtitle"], "Stopped")
+
+    def test_the_poll_interval_is_not_a_five_second_spin(self):
+        # At 5s a `systemctl status` poll spawned ~17,280 processes a day in a
+        # feature whose point is saving battery.
+        result = run_scenario("enable")
+        self.assertEqual(result["installedSources"], 1)
+        self.assertGreaterEqual(
+            result["pollSeconds"],
+            30,
+            "the background status poll must not run on a handful of seconds",
+        )
+
+
+@unittest.skipIf(NODE is None, "node is not installed; cannot execute toggle.js")
+class TestSyncthingToggleMeteredReconcile(unittest.TestCase):
+    """A metered pause must be a pause, and must reverse itself."""
+
+    def test_metered_pause_runs_the_same_verbs_as_a_manual_toggle_off(self):
+        # A pause that only stops the unit leaves it enabled, so syncing comes
+        # straight back at the next login — on the same metered link.
+        manual = [argv[2] for argv in run_scenario("clicked", checked=False)["systemctl"]]
+        paused = [argv[2] for argv in run_scenario("metered-transition")["paused"]["systemctl"]]
+        self.assertEqual(paused, manual)
+        self.assertIn("disable", paused)
+
+    def test_returning_to_an_unmetered_network_resumes_sharing(self):
+        resumed = run_scenario("metered-transition")["resumed"]
+        self.assertEqual(
+            [argv[2] for argv in resumed["systemctl"]],
+            ["start", "enable"],
+        )
+        self.assertFalse(resumed["pausedForMetered"])
+        self.assertEqual(resumed["toggle"]["subtitle"], "Running")
+
+    def test_both_transitions_are_announced(self):
+        result = run_scenario("metered-transition")
+        self.assertEqual(
+            [n["title"] for n in result["paused"]["notifications"]],
+            ["Sync Folder Sharing Paused"],
+        )
+        self.assertEqual(
+            [n["title"] for n in result["resumed"]["notifications"]],
+            ["Sync Folder Sharing Resumed"],
+        )
+
+    def test_metered_reconcile_honours_start_stop_only(self):
+        result = run_scenario("metered-transition", startStopOnly=True)
+        self.assertEqual(
+            [argv[2] for argv in result["paused"]["systemctl"]], ["stop"]
+        )
+        self.assertEqual(
+            [argv[2] for argv in result["resumed"]["systemctl"]], ["start"]
+        )
+
+    def test_a_network_change_never_resumes_what_the_user_turned_off(self):
+        # Sharing is off by the user's own choice: neither edge may touch it.
+        result = run_scenario("metered-transition", unitRunning=False, checked=False)
+        self.assertEqual(result["paused"]["systemctl"], [])
+        self.assertEqual(result["resumed"]["systemctl"], [])
+        self.assertEqual(result["paused"]["notifications"], [])
+        self.assertEqual(result["resumed"]["notifications"], [])
+
+    def test_a_second_metered_edge_does_not_pause_twice(self):
+        # NetworkManager emits notify::network-metered more than once per
+        # connection change; re-running stop/disable each time is pure noise.
+        result = run_scenario("metered-transition", pausedForMetered=True)
+        self.assertEqual(result["paused"]["systemctl"], [])
+        self.assertEqual(result["paused"]["notifications"], [])
+        self.assertEqual(
+            [argv[2] for argv in result["resumed"]["systemctl"]], ["start", "enable"]
+        )
+
+    def test_turning_on_over_a_metered_link_is_honoured_once_unmetered(self):
+        result = run_scenario("metered-click-then-unmeter")
+        self.assertEqual(
+            result["refused"]["systemctl"], [], "nothing may start while metered"
+        )
+        self.assertEqual(
+            result["refused"]["generate"], [], "nothing may be spawned while metered"
+        )
+        self.assertFalse(result["refused"]["checked"])
+        self.assertEqual(
+            [argv[2] for argv in result["resumed"]["systemctl"]], ["start", "enable"]
+        )
+
+    def test_a_pause_systemctl_refused_is_retried_on_the_next_edge(self):
+        # The flag is the permission to resume. Claiming it for a stop that
+        # never happened would make the next unmetered edge "resume" a unit
+        # that was never paused, and suppress the retry.
+        result = run_scenario("metered-transition", systemctlFails=True)
+        self.assertIn("stop", [argv[2] for argv in result["paused"]["systemctl"]])
+        self.assertEqual(result["paused"]["notifications"], [])
+        self.assertFalse(result["paused"]["pausedForMetered"])
+        self.assertEqual(result["resumed"]["systemctl"], [])
+
+
+@unittest.skipIf(NODE is None, "node is not installed; cannot execute toggle.js")
+class TestSyncthingToggleConfigSeeding(unittest.TestCase):
+    """Seeding ~/Sync and an initial config.xml for a first-run daemon."""
+
+    def test_seeding_creates_the_sync_and_state_directories(self):
+        result = run_scenario("config-seed")
+        self.assertIn(f"{result['paths']['homeDir']}/Sync", result["createdDirs"])
+        self.assertIn(result["paths"]["stateDir"], result["createdDirs"])
+
+    def test_syncthing_is_generated_offline_into_the_state_directory(self):
+        result = run_scenario("config-seed")
+        self.assertEqual(
+            result["generate"],
+            [
+                [
+                    "syncthing",
+                    "generate",
+                    f"--home={result['paths']['stateDir']}",
+                    "--no-port-probing",
+                ]
+            ],
+        )
+
+    def test_seeded_folder_points_at_the_sync_directory(self):
+        result = run_scenario("config-seed")
+        written = result["writes"][0]["text"]
+        self.assertIn('<folder id="sync"', written)
+        self.assertIn(f'path="{result["paths"]["homeDir"]}/Sync"', written)
+
+    def test_gui_address_is_rewritten_to_the_configured_port(self):
+        # The Web GUI menu entry opens 127.0.0.1:<port>; the daemon has to be
+        # listening there.
+        result = run_scenario("config-seed", port=12345)
+        self.assertIn("<address>127.0.0.1:12345</address>", result["writes"][0]["text"])
+
+    def test_a_home_directory_with_xml_metacharacters_stays_parseable(self):
+        # $HOME is whatever the account says. An unescaped & or " lands in an
+        # attribute and syncthing refuses to start on the resulting config.
+        home = '/home/a&b"c<d>e'
+        result = run_scenario("config-seed", homeDir=home)
+        written = result["writes"][0]["text"]
+        self.assertIn('path="/home/a&amp;b&quot;c&lt;d&gt;e/Sync"', written)
+        self.assertNotIn(f'path="{home}/Sync"', written)
+        # Escaping is only worth anything if the result actually parses.
+        folder = ET.fromstring(written).find("folder")
+        self.assertEqual(folder.get("path"), f"{home}/Sync")
+
+    def test_the_default_device_template_is_left_untouched(self):
+        # Flipping auto-accept in <defaults> gives every device paired later
+        # blanket authority to create folders in $HOME with no prompt, and it
+        # stays in config.xml after the extension is uninstalled.
+        result = run_scenario(
+            "config-seed", generatedConfig=GENERATED_CONFIG_WITH_DEFAULTS
+        )
+        written = result["writes"][0]["text"]
+        self.assertIn(f"<{AUTO_ACCEPT}>false</{AUTO_ACCEPT}>", written)
+        self.assertNotIn(f"<{AUTO_ACCEPT}>true</{AUTO_ACCEPT}>", written)
+
+    def test_config_is_written_without_replacing_the_destination_inode(self):
+        # config.xml holds <apikey>, which is full control of the local REST
+        # API. REPLACE_DESTINATION creates a new inode: 0600 comes back 0644
+        # under the default umask, and a symlinked config is clobbered.
+        write = run_scenario("config-seed")["writes"][0]
+        self.assertIn(write["flags"], (CREATE_FLAGS_NONE, CREATE_FLAGS_PRIVATE))
+        self.assertNotEqual(write["flags"], CREATE_FLAGS_REPLACE_DESTINATION)
+        self.assertFalse(write["makeBackup"])
+
+    def test_a_config_already_provisioned_is_never_rewritten(self):
+        # dakota ships one through /etc/skel; the extension must not touch it.
+        result = run_scenario("config-seed", configExists=True)
+        self.assertEqual(result["writes"], [])
+        self.assertEqual(result["generate"], [])
+
+    def test_a_failed_generate_writes_nothing_and_is_logged(self):
+        result = run_scenario("config-seed", generateFails=True)
+        self.assertEqual(result["writes"], [])
+        self.assertTrue(
+            any("generate" in part for error in result["errors"] for part in error),
+            f"expected a logged generate failure, got {result['errors']}",
+        )
+
+    def test_a_generate_that_produced_no_config_writes_nothing(self):
+        result = run_scenario("config-seed", generateProducesNothing=True)
+        self.assertEqual(result["writes"], [])
+        self.assertEqual(result["errors"], [])
+
+    def test_turning_the_toggle_on_seeds_before_starting_the_unit(self):
+        result = run_scenario(
+            "clicked", checked=True, configExists=False, syncDirExists=False
+        )
+        self.assertEqual(len(result["generate"]), 1)
+        self.assertEqual(result["systemctl"][0][2], "start")
+
+    def test_turning_the_toggle_off_never_seeds(self):
+        result = run_scenario(
+            "clicked", checked=False, configExists=False, syncDirExists=False
+        )
+        self.assertEqual(result["generate"], [])
+        self.assertEqual(result["createdDirs"], [])
+
+
+@unittest.skipIf(NODE is None, "node is not installed; cannot execute toggle.js")
+class TestSyncthingToggleSeedingDestroyGuards(unittest.TestCase):
+    """disable() can land inside any of the seeding awaits."""
+
+    def test_a_cancelled_status_callback_never_touches_the_widgets(self):
+        result = run_scenario("destroy-during-status", release="cancelled")
+        self.assertEqual(result["before"]["subtitle"], "Loading")
+        self.assertEqual(
+            result["after"],
+            result["before"],
+            "a callback delivered after disable() must leave every widget alone",
+        )
+
+    def test_a_status_callback_that_still_succeeds_after_disable_is_ignored(self):
+        # force_exit races the child: systemctl can have written its answer
+        # before the kill lands, so the callback arrives *successfully* once
+        # the widgets are gone. The catch path does not cover this one.
+        result = run_scenario(
+            "destroy-during-status", release="ok", statusStdout="active\n"
+        )
+        self.assertEqual(result["after"], result["before"])
+        self.assertEqual(result["after"]["subtitle"], "Loading")
+        self.assertFalse(result["after"]["indicatorVisible"])
+
+    def test_disable_mid_seed_abandons_the_rest_of_the_click(self):
+        # `syncthing generate` is the longest await on the click path. If
+        # disable() lands while it is outstanding, neither the config rewrite
+        # nor the systemctl sequence behind it may resume.
+        result = run_scenario("destroy-during-seed")
+        self.assertEqual(result["generateStarted"], 1)
+        self.assertEqual(
+            result["writtenPaths"],
+            [],
+            "config.xml must not be rewritten after the extension was disabled",
+        )
+        self.assertEqual(result["systemctl"], [])
+        self.assertEqual(result["notifications"], [])
+
+    def test_disable_kills_an_in_flight_syncthing_generate(self):
+        # A Cancellable aborts our end of the pipe; the child keeps running
+        # unless force_exit() is wired to it. The seeding spawn needs that too,
+        # not only the systemctl calls.
+        result = run_scenario("destroy-during-seed")
+        self.assertIn("syncthing", result["forceExits"])
+
+    def test_disable_mid_start_never_spawns_the_status_refresh(self):
+        # disable() lands while `systemctl start` is still outstanding. The
+        # refresh chained behind it would spawn a process for an extension
+        # that no longer exists.
+        result = run_scenario("destroy-during-systemctl")
+        self.assertEqual(result["started"], ["start"])
+        self.assertEqual(
+            result["statusSubprocesses"],
+            0,
+            "no status probe may be spawned after the extension was disabled",
+        )
+        self.assertEqual(result["verbs"], ["start"])
+        self.assertEqual(result["notifications"], [])
+
+
+class TestSyncthingToggleStaysOffTheCompositorThread(unittest.TestCase):
+    """Static guards for calls that freeze the whole desktop, not just a menu."""
+
+    BANNED = {
+        r"\bquery_exists\s*\(": "query_exists() blocks; use query_info_async()",
+        r"\bload_contents\s*\(": "load_contents() blocks; use load_contents_async()",
+        r"\breplace_contents\s*\(": (
+            "replace_contents() blocks; use replace_contents_bytes_async()"
+        ),
+        r"\bmake_directory_with_parents\s*\(": (
+            "make_directory_with_parents() blocks; walk parents with "
+            "make_directory_async()"
+        ),
+        r"\bfind_program_in_path\s*\(": (
+            "find_program_in_path() stats every PATH entry on the main loop; "
+            "let Gio.Subprocess resolve the binary in the child"
+        ),
+        r"REPLACE_DESTINATION": (
+            "REPLACE_DESTINATION drops the 0600 mode on a file holding <apikey>"
+        ),
+    }
+
+    def test_no_blocking_gio_call_reaches_the_shell_main_loop(self):
+        # Whole-line comments are dropped first: the source explains why each
+        # of these is banned, and naming one there is not calling it.
+        source = "\n".join(
+            line
+            for line in TOGGLE_JS.read_text(encoding="utf-8").splitlines()
+            if not line.lstrip().startswith("//")
+        )
+        for pattern, why in self.BANNED.items():
+            with self.subTest(pattern=pattern):
+                self.assertIsNone(
+                    re.search(pattern, source),
+                    f"extensions/syncthing-toggle/toggle.js: {why}",
+                )
 
 
 @unittest.skipIf(NODE is None, "node is not installed; cannot execute toggle.js")
