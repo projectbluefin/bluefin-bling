@@ -24,7 +24,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # The unittest suite runs `node --check` over every JS source and skips the
       # check only when node is absent. Set up node so the gate actually runs.
