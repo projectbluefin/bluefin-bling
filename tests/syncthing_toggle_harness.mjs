@@ -8,11 +8,13 @@
 //
 // Scope: ServiceToggle construction, ServiceIndicator icon resolution, the
 // 'clicked' orchestration, _runSystemctl argv, updateStatus, the status probe,
-// the metered pause/resume reconciliation, the config.xml seeding, and the
-// destroyed-flag guards that keep a cancelled callback off finalized widgets.
+// the metered pause/resume reconciliation, the ~/Sync config seeding, and the
+// use-after-destroy windows. The status subprocess is still distinguished from
+// _runSystemctl's by SubprocessFlags; only the scenarios that exist to pin the
+// status command itself look at its argv.
 //
 // The Gio.File stub deliberately implements ONLY the _async entry points. A
-// regression back to query_exists(null) / load_contents(null) /
+// regression to query_exists(null) / load_contents(null) /
 // replace_contents(..., null) fails here with a TypeError rather than silently
 // re-freezing the compositor.
 //
@@ -25,6 +27,7 @@ import {dirname, join} from 'node:path';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TOGGLE_JS = join(HERE, '..', 'extensions', 'syncthing-toggle', 'toggle.js');
+const EXTENSION_JS = join(HERE, '..', 'extensions', 'syncthing-toggle', 'extension.js');
 
 const IMPORT_LINE_RE =
     /^\s*import\s+(?:(\*\s+as\s+\w+)|(\{[^}]*\})|(\w+))\s+from\s+['"](?:gi:\/\/|resource:\/\/\/)[^'"]+['"];?\s*$/gm;
@@ -35,7 +38,12 @@ function loadToggleModule() {
     if (matches.length === 0)
         throw new Error('no gi:// or resource:/// imports found — harness rewrite is stale');
 
-    const rewritten = source.replace(
+    const url = asDataModule(rewriteGnomeImports(source));
+    return import(url);
+}
+
+function rewriteGnomeImports(source) {
+    return source.replace(
         IMPORT_LINE_RE,
         (_line, namespaceImport, namedImport, defaultImport) => {
             if (namespaceImport) {
@@ -50,11 +58,156 @@ function loadToggleModule() {
             return `const ${defaultImport} = globalThis.__stStubs.${defaultImport};`;
         },
     );
-    const url = `data:text/javascript;base64,${Buffer.from(rewritten, 'utf8').toString('base64')}`;
-    return import(url);
+}
+
+function asDataModule(source) {
+    return `data:text/javascript;base64,${Buffer.from(source, 'utf8').toString('base64')}`;
+}
+
+// extension.js is the entry point GNOME Shell calls, and the only place the
+// enable()/disable() lifecycle exists. It needs the same rewrite plus one more:
+// its relative `./toggle.js` import cannot resolve from a data: URL, so it is
+// bound to the toggle module this harness already loaded.
+const TOGGLE_IMPORT_RE =
+    /^\s*import\s+(\{[^}]*\})\s+from\s+['"]\.\/toggle\.js['"];?\s*$/gm;
+
+async function loadExtensionModule() {
+    globalThis.__stStubs.__toggle = await loadToggleModule();
+    const source = readFileSync(EXTENSION_JS, 'utf8');
+    if (!TOGGLE_IMPORT_RE.test(source))
+        throw new Error("extension.js no longer imports './toggle.js' — harness rewrite is stale");
+    const rewritten = rewriteGnomeImports(source).replace(
+        TOGGLE_IMPORT_RE,
+        (_line, named) => `const ${named} = globalThis.__stStubs.__toggle;`,
+    );
+    return import(asDataModule(rewritten));
 }
 
 // --- Stubs ------------------------------------------------------------------
+
+class FakeMenu {
+    constructor() {
+        this.header = null;
+        this.items = [];
+        this.actions = [];
+        this._settingsActions = {};
+    }
+
+    setHeader(icon, title) {
+        this.header = {icon, title};
+    }
+
+    addMenuItem(item) {
+        this.items.push(item);
+    }
+
+    addAction(label, callback) {
+        const item = makeMenuAction(label, callback);
+        this.actions.push(item);
+        return item;
+    }
+}
+
+// updateStatus() greys the Web GUI entry out while the daemon is down, so the
+// item a section hands back has to answer setSensitive().
+function makeMenuAction(label, callback) {
+    return {
+        label,
+        callback,
+        visible: true,
+        sensitive: true,
+        setSensitive(value) {
+            this.sensitive = value;
+        },
+    };
+}
+
+class FakePopupMenuSection {
+    constructor() {
+        this.kind = 'section';
+        this.actions = [];
+    }
+
+    addAction(label, callback) {
+        const item = makeMenuAction(label, callback);
+        this.actions.push(item);
+        return item;
+    }
+}
+
+class FakePopupSeparatorMenuItem {
+    constructor() {
+        this.kind = 'separator';
+    }
+}
+
+class FakeQuickMenuToggle {
+    constructor(params = {}) {
+        this.constructorParams = params;
+        this.title = params.title;
+        this.gicon = params.gicon;
+        this.toggleMode = params.toggleMode;
+        this.subtitle = params.subtitle;
+        this.checked = false;
+        this.menu = new FakeMenu();
+        this._handlers = new Map();
+        this._handlerIds = new Map();
+        this._nextHandlerId = 0;
+        this.destroyed = false;
+    }
+
+    connect(signal, callback) {
+        this._handlers.set(signal, callback);
+        const id = ++this._nextHandlerId;
+        this._handlerIds.set(id, signal);
+        return id;
+    }
+
+    disconnect(id) {
+        const signal = this._handlerIds.get(id);
+        if (signal === undefined)
+            return;
+        this._handlerIds.delete(id);
+        this._handlers.delete(signal);
+    }
+
+    handlerCount() {
+        return this._handlerIds.size;
+    }
+
+    emit(signal) {
+        return this._handlers.get(signal)?.();
+    }
+
+    set(props) {
+        Object.assign(this, props);
+    }
+
+    destroy() {
+        this.destroyed = true;
+    }
+}
+
+class FakeSystemIndicator {
+    constructor() {
+        this.quickSettingsItems = [];
+        this._indicators = [];
+        // gnome-shell destroys the quick settings items and then the indicator,
+        // so ServiceIndicator.destroy() is reachable twice; this counts how
+        // often the base teardown actually ran.
+        this.superDestroyCount = 0;
+    }
+
+    _addIndicator() {
+        const indicator = {visible: false, gicon: null};
+        this._indicators.push(indicator);
+        return indicator;
+    }
+
+    destroy() {
+        this.superDestroyCount += 1;
+    }
+}
 
 // Stand-in for the GLib error domain. toggle.js reaches it through
 // `e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.EXISTS)`.
@@ -105,7 +258,8 @@ class FakeFileSystem {
 }
 
 // Async-only Gio.File. Every finish() is reached through a queued callback, so
-// the awaits in toggle.js suspend exactly as they do under GIO.
+// the awaits in toggle.js suspend exactly as they do under GIO — and the
+// synchronous entry points simply do not exist.
 class FakeFile {
     constructor(path, fs) {
         this.path = path;
@@ -155,163 +309,19 @@ class FakeFile {
     }
 
     replace_contents_bytes_async(bytes, _etag, makeBackup, flags, _cancellable, callback) {
-        const pending = {bytes, makeBackup, flags};
-        queueMicrotask(() => callback(this, pending));
+        queueMicrotask(() => callback(this, {bytes, makeBackup, flags}));
     }
 
     replace_contents_finish(res) {
         const text = new TextDecoder('utf-8').decode(res.bytes.data ?? res.bytes);
         this._fs.files.set(this.path, text);
-        this._fs.writes.push({path: this.path, flags: res.flags, makeBackup: res.makeBackup, text});
+        this._fs.writes.push({
+            path: this.path,
+            flags: res.flags,
+            makeBackup: res.makeBackup,
+            text,
+        });
         return [true, null];
-    }
-}
-
-class FakeCancellable {
-    constructor(log) {
-        this._log = log;
-        this._handlers = new Map();
-        this._nextId = 1;
-        this.cancelled = false;
-    }
-
-    connect(callback) {
-        const id = this._nextId++;
-        this._handlers.set(id, callback);
-        this._log.cancellableHandlers += 1;
-        return id;
-    }
-
-    disconnect(id) {
-        if (this._handlers.delete(id))
-            this._log.cancellableHandlers -= 1;
-    }
-
-    cancel() {
-        this.cancelled = true;
-        for (const callback of [...this._handlers.values()])
-            callback();
-    }
-}
-
-class FakeNetworkMonitor {
-    constructor(metered) {
-        this._metered = metered;
-        this._handlers = new Map();
-        this._nextId = 1;
-        this.disconnected = [];
-    }
-
-    get_network_metered() {
-        return this._metered;
-    }
-
-    connect(signal, callback) {
-        const id = this._nextId++;
-        this._handlers.set(id, {signal, callback});
-        return id;
-    }
-
-    disconnect(id) {
-        this.disconnected.push(id);
-        this._handlers.delete(id);
-    }
-
-    setMetered(value) {
-        this._metered = value;
-        for (const {signal, callback} of [...this._handlers.values()]) {
-            if (signal === 'notify::network-metered')
-                callback();
-        }
-    }
-}
-
-class FakeMenu {
-    constructor() {
-        this.header = null;
-        this.items = [];
-        this.actions = [];
-        this._settingsActions = {};
-    }
-
-    setHeader(icon, title) {
-        this.header = {icon, title};
-    }
-
-    addMenuItem(item) {
-        this.items.push(item);
-    }
-
-    addAction(label, callback) {
-        const item = makeMenuAction(label, callback);
-        this.actions.push(item);
-        return item;
-    }
-}
-
-function makeMenuAction(label, callback) {
-    return {
-        label,
-        callback,
-        visible: true,
-        sensitive: true,
-        setSensitive(value) {
-            this.sensitive = value;
-        },
-    };
-}
-
-class FakePopupMenuSection {
-    constructor() {
-        this.kind = 'section';
-        this.actions = [];
-    }
-
-    addAction(label, callback) {
-        const item = makeMenuAction(label, callback);
-        this.actions.push(item);
-        return item;
-    }
-}
-
-class FakePopupSeparatorMenuItem {
-    constructor() {
-        this.kind = 'separator';
-    }
-}
-
-class FakeQuickMenuToggle {
-    constructor(params = {}) {
-        this.constructorParams = params;
-        this.title = params.title;
-        this.gicon = params.gicon;
-        this.toggleMode = params.toggleMode;
-        this.subtitle = params.subtitle;
-        this.checked = false;
-        this.menu = new FakeMenu();
-        this._handlers = new Map();
-    }
-
-    connect(signal, callback) {
-        this._handlers.set(signal, callback);
-        return this._handlers.size;
-    }
-
-    set(props) {
-        Object.assign(this, props);
-    }
-}
-
-class FakeSystemIndicator {
-    constructor() {
-        this.quickSettingsItems = [];
-        this._indicators = [];
-    }
-
-    _addIndicator() {
-        const indicator = {visible: false, gicon: null};
-        this._indicators.push(indicator);
-        return indicator;
     }
 }
 
@@ -331,34 +341,28 @@ function makeStubs(options) {
         launchedUris: [],
         iconStrings: [],
         systemctl: [],
-        generate: [],
         statusSubprocesses: 0,
-        statusArgv: null,
         errors: [],
-        forceExits: [],
-        cancellableHandlers: 0,
+        // Every Gio.Subprocess.new(), with the cancellable it was handed and
+        // whether cancelling that cancellable actually killed the child.
+        subprocesses: [],
+        // GLib main-loop sources still installed, keyed by source id.
+        sources: new Map(),
+        nextSourceId: 1,
+        openPreferencesCalls: 0,
+        externalIndicators: [],
+        // `syncthing generate` is kept out of log.systemctl so the verb
+        // assertions stay about systemctl.
+        generate: [],
+        // Callbacks held back by options.deferStatus / deferGenerate /
+        // deferSystemctl, so a scenario can land disable() inside one specific
+        // await window and then release it.
         pendingStatus: [],
         pendingGenerate: [],
         pendingSystemctl: [],
         systemctlDeferred: Boolean(options.deferSystemctl),
         statusCancelled: false,
-        timeouts: [],
-        removedSources: [],
-        sources: new Map(),
-        nextSourceId: 1,
     };
-
-    const homeDir = options.homeDir ?? '/home/tester';
-    const stateDir = `${homeDir}/.local/state/syncthing`;
-    const configPath = `${stateDir}/config.xml`;
-
-    const fs = new FakeFileSystem();
-    fs.addDir(homeDir);
-    if (options.syncDirExists ?? true)
-        fs.addDir(`${homeDir}/Sync`);
-    if (options.configExists ?? true)
-        fs.addFile(configPath, options.existingConfig ?? DEFAULT_GENERATED_CONFIG);
-    log.fs = fs;
 
     const settingsValues = {
         'service-name': options.serviceName ?? 'syncthing.service',
@@ -379,128 +383,205 @@ function makeStubs(options) {
         },
     };
 
-    const networkMonitor = new FakeNetworkMonitor(options.metered ?? false);
-    log.networkMonitor = networkMonitor;
-    log.setMetered = value => networkMonitor.setMetered(value);
+    const homeDir = options.homeDir ?? '/home/tester';
+    const stateDir = `${homeDir}/.local/state/syncthing`;
+    const configPath = `${stateDir}/config.xml`;
 
-    // Release a status probe whose callback was held back with
-    // options.deferStatus. GIO still invokes the callback after a cancel — with
-    // G_IO_ERROR_CANCELLED — which is exactly the use-after-destroy window.
+    const fs = new FakeFileSystem();
+    fs.addDir(homeDir);
+    if (options.syncDirExists ?? true)
+        fs.addDir(`${homeDir}/Sync`);
+    // Provisioned by default — dakota ships a config through /etc/skel, and
+    // that is the case every pre-existing scenario runs under.
+    if (options.configExists ?? true)
+        fs.addFile(configPath, options.existingConfig ?? DEFAULT_GENERATED_CONFIG);
+    log.fs = fs;
+
+    // Release a callback held back by one of the defer options. GIO still
+    // invokes a cancelled callback — with G_IO_ERROR_CANCELLED — which is
+    // exactly the use-after-destroy window; 'ok' models the other one, where
+    // the child answered before force_exit landed.
     log.releaseStatus = mode => {
         log.statusCancelled = mode === 'cancelled';
         for (const deliver of log.pendingStatus.splice(0))
             deliver();
     };
-
-    // Same trick for `syncthing generate`, which is the longest await on the
-    // click path and therefore the widest window for disable() to land in.
     log.releaseGenerate = () => {
         for (const deliver of log.pendingGenerate.splice(0))
             deliver();
     };
-
-    // ...and for the first systemctl verb, so disable() can land between the
-    // start and the status refresh chained behind it.
     log.releaseSystemctl = () => {
         log.systemctlDeferred = false;
         for (const deliver of log.pendingSystemctl.splice(0))
             deliver();
     };
 
-    // The status probe is the only STDOUT_PIPE subprocess; `syncthing generate`
-    // and the systemctl verbs are split by argv[0].
+    // What the status read reports. A successful start/stop moves it, so the
+    // status read the toggle does after every call sees the unit it just acted
+    // on rather than a frozen string. `is-active` prints one word; `status`
+    // prints a journal-shaped block. options.statusStdout overrides both.
+    let unitRunning = options.unitRunning ?? false;
+    const statusText = argv => {
+        if (options.statusStdout !== undefined)
+            return options.statusStdout;
+        if (argv[2] === 'is-active')
+            return unitRunning ? 'active\n' : 'inactive\n';
+        return unitRunning ? 'Active: active (running) since now' : 'Active: inactive (dead)';
+    };
+
+    // _runSystemctl uses SubprocessFlags.NONE; checkStatus uses STDOUT_PIPE.
+    // Splitting on the flag keeps the status command out of these assertions.
     function makeSubprocess(argv, flags) {
+        // Cancelling a Cancellable does not drop the pending callback: it still
+        // fires, with G_IO_ERROR_CANCELLED. The record also tracks force_exit,
+        // because the cancellable alone only abandons the local wait — the
+        // systemctl child keeps running unless the extension kills it.
+        const record = {argv, flags, cancellable: null, forcedExit: false};
+        log.subprocesses.push(record);
         const proc = {
             force_exit() {
-                log.forceExits.push(argv);
+                record.forcedExit = true;
             },
         };
 
         if (flags === Gio.SubprocessFlags.STDOUT_PIPE) {
             log.statusSubprocesses += 1;
             log.statusArgv = argv;
-            proc.communicate_utf8_async = (_stdin, _cancellable, callback) => {
-                const deliver = () => callback(proc, 'res');
-                if (options.deferStatus)
-                    log.pendingStatus.push(deliver);
-                else
-                    queueMicrotask(deliver);
-            };
-            proc.communicate_utf8_finish = () => {
-                if (log.statusCancelled) {
-                    throw new FakeGioError(
-                        IO_ERROR_ENUM.CANCELLED,
-                        'Operation was cancelled',
-                    );
-                }
-                return [true, options.statusStdout ?? '', ''];
-            };
-            return proc;
+            return Object.assign(proc, {
+                communicate_utf8_async(_stdin, cancellable, callback) {
+                    record.cancellable = cancellable;
+                    const deliver = () => callback(this, 'res');
+                    if (options.deferStatus)
+                        log.pendingStatus.push(deliver);
+                    else
+                        queueMicrotask(deliver);
+                },
+                communicate_utf8_finish() {
+                    if (record.cancellable?.cancelled || log.statusCancelled)
+                        throw new FakeGioError(IO_ERROR_ENUM.CANCELLED, 'Operation was cancelled');
+                    return [true, statusText(argv), ''];
+                },
+            });
         }
 
-        const isGenerate = argv[0] === 'syncthing';
+        const isGenerate = argv[0] !== 'systemctl';
         if (isGenerate)
             log.generate.push(argv);
         else
             log.systemctl.push(argv);
 
-        proc.wait_check_async = (_cancellable, callback) => {
-            const deliver = () => callback(proc, 'res');
-            if (isGenerate && options.deferGenerate)
-                log.pendingGenerate.push(deliver);
-            else if (!isGenerate && log.systemctlDeferred)
-                log.pendingSystemctl.push(deliver);
-            else
-                queueMicrotask(deliver);
-        };
-        proc.wait_check_finish = () => {
-            if (isGenerate) {
-                if (options.generateFails)
-                    throw new Error('syncthing generate failed');
-                if (!options.generateProducesNothing) {
-                    const home = argv.find(a => a.startsWith('--home='))?.slice('--home='.length);
-                    fs.addFile(
-                        `${home}/config.xml`,
-                        options.generatedConfig ?? DEFAULT_GENERATED_CONFIG,
-                    );
+        return Object.assign(proc, {
+            wait_check_async(cancellable, callback) {
+                record.cancellable = cancellable;
+                const deliver = () => callback(this, 'res');
+                if (isGenerate && options.deferGenerate)
+                    log.pendingGenerate.push(deliver);
+                else if (!isGenerate && log.systemctlDeferred)
+                    log.pendingSystemctl.push(deliver);
+                else
+                    queueMicrotask(deliver);
+            },
+            wait_check_finish() {
+                if (record.cancellable?.cancelled)
+                    throw new FakeGioError(IO_ERROR_ENUM.CANCELLED, 'Operation was cancelled');
+                if (isGenerate) {
+                    if (options.generateFails)
+                        throw new Error('syncthing generate failed');
+                    if (!options.generateProducesNothing) {
+                        const home = argv
+                            .find(entry => entry.startsWith('--home='))
+                            ?.slice('--home='.length);
+                        fs.addFile(
+                            `${home}/config.xml`,
+                            options.generatedConfig ?? DEFAULT_GENERATED_CONFIG,
+                        );
+                    }
+                    return true;
                 }
+                if (options.systemctlFails)
+                    throw new Error('systemctl failed');
+                if (argv[2] === 'start')
+                    unitRunning = true;
+                else if (argv[2] === 'stop')
+                    unitRunning = false;
                 return true;
-            }
-            if (options.systemctlFails)
-                throw new Error('systemctl failed');
-            return true;
-        };
-        return proc;
+            },
+        });
     }
+
+    class FakeCancellable {
+        constructor() {
+            this.cancelled = false;
+            this._handlers = new Map();
+            this._nextId = 0;
+        }
+
+        connect(callback) {
+            const id = ++this._nextId;
+            this._handlers.set(id, callback);
+            return id;
+        }
+
+        disconnect(id) {
+            this._handlers.delete(id);
+        }
+
+        cancel() {
+            if (this.cancelled)
+                return;
+            this.cancelled = true;
+            for (const callback of [...this._handlers.values()])
+                callback();
+        }
+
+        get handlerCount() {
+            return this._handlers.size;
+        }
+    }
+
+    const networkMonitor = {
+        metered: options.metered ?? false,
+        handlers: new Map(),
+        nextHandlerId: 0,
+        get_network_metered() {
+            return this.metered;
+        },
+        connect(signal, callback) {
+            const id = ++this.nextHandlerId;
+            this.handlers.set(id, {signal, callback});
+            return id;
+        },
+        disconnect(id) {
+            this.handlers.delete(id);
+        },
+        emit(signal) {
+            for (const handler of [...this.handlers.values()]) {
+                if (handler.signal === signal)
+                    handler.callback();
+            }
+        },
+    };
 
     const Gio = {
         SubprocessFlags: {NONE: 0, STDOUT_PIPE: 1},
-        FileCreateFlags: {NONE: 0, PRIVATE: 1, REPLACE_DESTINATION: 2},
-        FileQueryInfoFlags: {NONE: 0, NOFOLLOW_SYMLINKS: 1},
-        IOErrorEnum: IO_ERROR_ENUM,
-        Cancellable: class extends FakeCancellable {
-            constructor() {
-                super(log);
-            }
-        },
-        File: {
-            new_for_path(path) {
-                return new FakeFile(path, fs);
-            },
-        },
-        NetworkMonitor: {
-            get_default() {
-                if (options.noNetworkMonitor)
-                    return null;
-                return networkMonitor;
-            },
-        },
         Subprocess: {
             new(argv, flags) {
                 if (options.subprocessThrows)
                     throw new Error('spawn refused');
                 return makeSubprocess(argv, flags);
             },
+        },
+        Cancellable: FakeCancellable,
+        FileCreateFlags: {NONE: 0, PRIVATE: 1, REPLACE_DESTINATION: 2},
+        FileQueryInfoFlags: {NONE: 0, NOFOLLOW_SYMLINKS: 1},
+        IOErrorEnum: IO_ERROR_ENUM,
+        File: {
+            new_for_path(path) {
+                return new FakeFile(path, fs);
+            },
+        },
+        NetworkMonitor: {
+            get_default: () => networkMonitor,
         },
         icon_new_for_string(name) {
             log.iconStrings.push(name);
@@ -514,36 +595,36 @@ function makeStubs(options) {
         },
     };
 
+    const GObject = {
+        registerClass(klass) {
+            return klass;
+        },
+    };
+
+    // Sources are recorded, never armed: the scenarios fire the callback
+    // themselves, so a poll interval change cannot slow the suite down.
     const GLib = {
         PRIORITY_DEFAULT: 0,
         PRIORITY_LOW: 300,
-        SOURCE_CONTINUE: true,
         SOURCE_REMOVE: false,
+        SOURCE_CONTINUE: true,
         get_home_dir() {
             return homeDir;
-        },
-        timeout_add_seconds(priority, intervalSeconds, callback) {
-            const id = log.nextSourceId++;
-            log.timeouts.push({id, priority, intervalSeconds});
-            log.sources.set(id, callback);
-            return id;
-        },
-        Source: {
-            remove(id) {
-                log.removedSources.push(id);
-                return log.sources.delete(id);
-            },
         },
         Bytes: {
             new(data) {
                 return {data};
             },
         },
-    };
-
-    const GObject = {
-        registerClass(klass) {
-            return klass;
+        timeout_add_seconds(_priority, seconds, callback) {
+            const id = log.nextSourceId++;
+            log.sources.set(id, {seconds, callback});
+            return id;
+        },
+        Source: {
+            remove(id) {
+                log.sources.delete(id);
+            },
         },
     };
 
@@ -552,13 +633,42 @@ function makeStubs(options) {
             log.notifications.push({title, body});
         },
         sessionMode: {allowSettings: options.allowSettings ?? true},
+        panel: {
+            statusArea: {
+                quickSettings: {
+                    addExternalIndicator(indicator) {
+                        log.externalIndicators.push(indicator);
+                    },
+                },
+            },
+        },
     };
+
+    // extension.js extends Extension and is constructed by the shell with no
+    // arguments, so the stub supplies the same surface makeExtensionObject does.
+    class FakeExtension {
+        constructor() {
+            this.uuid = 'syncthing-toggle@projectbluefin.io';
+            this.path =
+                options.extensionPath ??
+                '/usr/share/gnome-shell/extensions/syncthing-toggle';
+        }
+
+        getSettings() {
+            return settings;
+        }
+
+        openPreferences() {
+            log.openPreferencesCalls += 1;
+        }
+    }
 
     const stubs = {
         Gio,
         GLib,
         GObject,
         Main,
+        Extension: FakeExtension,
         PopupMenu: {
             PopupMenuSection: FakePopupMenuSection,
             PopupSeparatorMenuItem: FakePopupSeparatorMenuItem,
@@ -568,7 +678,7 @@ function makeStubs(options) {
         gettext: text => text,
     };
 
-    return {stubs, log, settings, paths: {homeDir, stateDir, configPath}};
+    return {stubs, log, settings, networkMonitor, paths: {homeDir, stateDir, configPath}};
 }
 
 function makeExtensionObject(settings, options) {
@@ -595,23 +705,59 @@ async function settle() {
 // --- Scenarios --------------------------------------------------------------
 
 async function build(options) {
-    const {stubs, log, settings, paths} = makeStubs(options);
+    const {stubs, log, settings, networkMonitor, paths} = makeStubs(options);
     globalThis.__stStubs = stubs;
     globalThis.logError = (...args) => log.errors.push(args.map(String));
 
     const module = await loadToggleModule();
     const extension = makeExtensionObject(settings, options);
     const indicator = new module.ServiceIndicator(extension.object);
-    return {indicator, log, paths, extensionLog: extension.log};
+    return {indicator, log, networkMonitor, paths, extensionLog: extension.log};
 }
 
-function snapshotWidgets(indicator) {
+// Drive the real entry point instead of constructing the indicator directly:
+// enable()/disable() live in extension.js and are the only place the lifecycle
+// — the initial reconcile, the poll source, the teardown — can be observed.
+async function buildExtension(options) {
+    const {stubs, log, networkMonitor, paths} = makeStubs(options);
+    globalThis.__stStubs = stubs;
+    globalThis.logError = (...args) => log.errors.push(args.map(String));
+
+    const module = await loadExtensionModule();
+    const extension = new module.default();
+    extension.enable();
+    await settle();
+    return {extension, indicator: extension._indicator, log, networkMonitor, paths};
+}
+
+// The single installed poll source. Reported rather than asserted on here so an
+// extension that installs none produces a failing report, not a crash.
+function pollSource(log) {
+    const [id] = [...log.sources.keys()];
+    if (id === undefined)
+        return {id: null, seconds: 0, callback: () => null};
+    return {id, ...log.sources.get(id)};
+}
+
+function toggleState(indicator) {
     return {
-        indicatorVisible: indicator._indicator.visible,
         checked: indicator._toggle.checked,
         subtitle: indicator._toggle.subtitle,
+        indicatorVisible: indicator._indicator.visible,
+    };
+}
+
+// toggleState plus the Web GUI entry, for the scenarios that assert nothing
+// moved rather than that something specific did.
+function widgetState(indicator) {
+    return {
+        ...toggleState(indicator),
         webGuiSensitive: indicator._toggle.webGuiItem.sensitive,
     };
+}
+
+function verbs(log) {
+    return log.subprocesses.filter(call => call.argv[0] === 'systemctl').map(call => call.argv[2]);
 }
 
 const scenarios = {
@@ -645,8 +791,7 @@ const scenarios = {
             settingsActionVisible: toggle.menu.actions[0]?.visible ?? null,
             quickSettingsItemCount: indicator.quickSettingsItems.length,
             quickSettingsItemIsToggle: indicator.quickSettingsItems[0] === toggle,
-            webGuiItemIsSectionAction:
-                indicator._toggle.webGuiItem === toggle._itemsSection.actions[0],
+            webGuiItemIsSectionAction: toggle.webGuiItem === toggle._itemsSection.actions[0],
         };
     },
 
@@ -664,48 +809,15 @@ const scenarios = {
         return {openPreferencesCalls: extensionLog.openPreferencesCalls};
     },
 
-    // updateStatus is the single writer of indicator visibility, the toggle's
-    // checked/subtitle pair, and the Web GUI item's sensitivity.
+    // updateStatus is the single writer of indicator visibility and the
+    // toggle's checked/subtitle pair.
     async 'update-status'(options) {
         const {indicator} = await build(options);
         indicator.updateStatus(true);
-        const active = snapshotWidgets(indicator);
+        const active = widgetState(indicator);
         indicator.updateStatus(false);
-        const inactive = snapshotWidgets(indicator);
+        const inactive = widgetState(indicator);
         return {active, inactive};
-    },
-
-    // checkStatus' own probe: which command it runs and what it concludes.
-    async 'status-probe'(options) {
-        const {indicator, log} = await build(options);
-        await indicator.checkStatus();
-        await settle();
-        return {
-            statusArgv: log.statusArgv,
-            statusSubprocesses: log.statusSubprocesses,
-            widgets: snapshotWidgets(indicator),
-            errors: log.errors,
-        };
-    },
-
-    // The background poll: how often it runs, and whether destroy() takes the
-    // source with it.
-    async 'poll-lifecycle'(options) {
-        const {indicator, log} = await build(options);
-        const installed = log.timeouts.map(t => ({
-            intervalSeconds: t.intervalSeconds,
-            priority: t.priority,
-        }));
-        const liveBefore = [...log.sources.keys()];
-        indicator.destroy();
-        await settle();
-        return {
-            installed,
-            liveBefore,
-            removedSources: log.removedSources,
-            liveAfter: [...log.sources.keys()],
-            monitorDisconnects: log.networkMonitor.disconnected.length,
-        };
     },
 
     // The 'clicked' handler notifies, then drives systemctl. options.checked is
@@ -719,52 +831,323 @@ const scenarios = {
             notifications: log.notifications,
             systemctl: log.systemctl,
             generate: log.generate,
-            statusSubprocesses: log.statusSubprocesses,
             createdDirs: log.fs.created,
             pausedForMetered: indicator._pausedForMetered,
             checked: indicator._toggle.checked,
+            statusSubprocesses: log.statusSubprocesses,
+            errors: log.errors,
+        };
+    },
+
+    // enable() reconciles once: it reads the unit state nobody clicked, and —
+    // because notify::network-metered only fires on a *change* — checks the
+    // current metered state itself. A session that starts on mobile data with
+    // the unit enabled from last time gets no signal at all.
+    async 'enable'(options) {
+        const {indicator, log} = await buildExtension(options);
+        const source = pollSource(log);
+        return {
+            verbs: verbs(log),
+            statusSubprocesses: log.statusSubprocesses,
+            notifications: log.notifications,
+            toggle: toggleState(indicator),
+            installedSources: log.sources.size,
+            pollSeconds: source.seconds,
+            programs: [...new Set(log.subprocesses.map(call => call.argv[0]))],
+            externalIndicators: log.externalIndicators.length,
+            errors: log.errors,
+        };
+    },
+
+    // The unit can be started or stopped by anything on the system, so the
+    // toggle re-reads it on a timer instead of trusting its own last click.
+    async 'poll-tick'(options) {
+        // One options object, mutated in place: the stubs read it lazily, so
+        // the scenario can move the world between phases.
+        const opts = {...options, unitRunning: true};
+        const {indicator, log} = await buildExtension(opts);
+        const before = toggleState(indicator);
+        const source = pollSource(log);
+
+        // The unit dies behind the extension's back.
+        opts.statusStdout = 'Active: inactive (dead)';
+        log.statusSubprocesses = 0;
+        const returnValue = source.callback();
+        await settle();
+        return {before, returnValue, statusSubprocesses: log.statusSubprocesses, after: toggleState(indicator)};
+    },
+
+    // disable() must leave nothing that can fire against torn-down widgets:
+    // no source, no signal handlers, and no subprocess a late callback spawns.
+    async 'disable'(options) {
+        const {extension, indicator, log, networkMonitor} = await buildExtension({
+            ...options,
+            unitRunning: true,
+        });
+        const source = pollSource(log);
+        const toggle = indicator._toggle;
+        const cancellable = indicator._cancellable;
+
+        extension.disable();
+        log.subprocesses.length = 0;
+        log.notifications.length = 0;
+
+        // A stale tick, a late click and a late metered signal all arrive after
+        // teardown in a real session.
+        const staleTimerReturn = source.callback();
+        toggle.emit('clicked');
+        networkMonitor.metered = true;
+        networkMonitor.emit('notify::network-metered');
+        await settle();
+
+        let secondDestroyError = null;
+        try {
+            indicator.destroy();
+        } catch (error) {
+            secondDestroyError = String(error?.message ?? error);
+        }
+
+        return {
+            liveSources: log.sources.size,
+            networkMonitorHandlers: networkMonitor.handlers.size,
+            toggleHandlers: toggle.handlerCount(),
+            cancellableCancelled: Boolean(cancellable?.cancelled),
+            superDestroyCount: indicator.superDestroyCount,
+            staleTimerReturn,
+            subprocessesAfterDisable: log.subprocesses.map(call => call.argv),
+            notificationsAfterDisable: log.notifications,
+            secondDestroyError,
+        };
+    },
+
+    // enable()'s status read is still in flight when disable() lands.
+    async 'cancellation'(options) {
+        const {stubs, log, networkMonitor} = makeStubs({...options, unitRunning: true});
+        globalThis.__stStubs = stubs;
+        globalThis.logError = (...args) => log.errors.push(args.map(String));
+
+        const module = await loadExtensionModule();
+        const extension = new module.default();
+        extension.enable();
+        // No settle(): the subprocess callbacks are still queued.
+        const inFlight = log.subprocesses.length;
+        const indicator = extension._indicator;
+        const cancellable = indicator._cancellable;
+        const subtitleBefore = indicator._toggle.subtitle;
+
+        extension.disable();
+        await settle();
+
+        return {
+            inFlightAtDisable: inFlight,
+            everyCallCancellable:
+                log.subprocesses.length > 0 &&
+                log.subprocesses.every(call => Boolean(call.cancellable)),
+            // A Cancellable only abandons the local wait; the systemctl child
+            // survives unless cancellation is wired to force_exit().
+            everySubprocessForcedExit:
+                log.subprocesses.length > 0 &&
+                log.subprocesses.every(call => call.forcedExit === true),
+            cancellableHandlersLeft: cancellable ? cancellable.handlerCount : -1,
+            subtitleBefore,
+            subtitleAfter: indicator._toggle.subtitle,
+            indicatorVisible: indicator._indicator.visible,
+            notifications: log.notifications,
+            networkMonitorHandlers: networkMonitor.handlers.size,
+        };
+    },
+
+    // Turning the toggle on over a metered connection is refused before
+    // anything is spawned.
+    async 'metered-click'(options) {
+        const {indicator, log} = await buildExtension({...options, metered: true});
+        log.subprocesses.length = 0;
+        log.systemctl.length = 0;
+        log.notifications.length = 0;
+
+        indicator._toggle.checked = true;
+        await indicator._toggle.emit('clicked');
+        await settle();
+        return {
+            systemctl: log.systemctl,
+            checked: indicator._toggle.checked,
+            notifications: log.notifications,
+        };
+    },
+
+    // Going metered while the unit runs pauses it, and the pause is announced
+    // only once the unit is really down.
+    async 'metered-signal'(options) {
+        const {extension, indicator, log, networkMonitor} = await buildExtension({
+            ...options,
+            unitRunning: true,
+        });
+        log.subprocesses.length = 0;
+        log.notifications.length = 0;
+
+        // An unmetered notify must not stop anything.
+        networkMonitor.emit('notify::network-metered');
+        await settle();
+        const whileUnmetered = verbs(log);
+
+        networkMonitor.metered = true;
+        log.subprocesses.length = 0;
+        networkMonitor.emit('notify::network-metered');
+        await settle();
+
+        const result = {
+            whileUnmetered,
+            whenMetered: verbs(log),
+            notifications: log.notifications,
+            toggle: toggleState(indicator),
+            errors: log.errors,
+        };
+
+        extension.disable();
+        log.subprocesses.length = 0;
+        networkMonitor.emit('notify::network-metered');
+        await settle();
+        result.afterDisable = verbs(log);
+        return result;
+    },
+
+    // disable() lands in the window between a systemctl call that succeeded and
+    // the notification it would justify.
+    async 'disable-mid-click'(options) {
+        const {extension, indicator, log} = await buildExtension(options);
+        log.subprocesses.length = 0;
+        log.systemctl.length = 0;
+        log.notifications.length = 0;
+        log.statusSubprocesses = 0;
+
+        indicator._toggle.checked = true;
+        const clicked = indicator._toggle.emit('clicked');
+        // Wait for `start` to have succeeded and the status re-read to be in
+        // flight, then tear the extension down under it.
+        for (let i = 0; i < 50 && log.statusSubprocesses === 0; i++)
+            await Promise.resolve();
+        const startedBeforeDisable = log.systemctl.map(argv => argv[2]);
+        extension.disable();
+        await clicked;
+        await settle();
+
+        return {
+            startedBeforeDisable,
+            systemctl: log.systemctl,
+            notifications: log.notifications,
+            subtitle: indicator._toggle.subtitle,
+        };
+    },
+
+    // systemctl can refuse: a missing unit, a masked unit, a failing ExecStart.
+    // Announcing the new state before the call means claiming "sharing enabled"
+    // for a service that never came up, and `enable` would make it stick.
+    async 'failed-start'(options) {
+        const {indicator, log} = await buildExtension(options);
+        log.subprocesses.length = 0;
+        log.systemctl.length = 0;
+        log.notifications.length = 0;
+        log.errors.length = 0;
+
+        options.systemctlFails = true;
+        indicator._toggle.checked = true;
+        await indicator._toggle.emit('clicked');
+        await settle();
+        return {
+            verbs: verbs(log),
+            notifications: log.notifications,
+            toggle: toggleState(indicator),
+            errors: log.errors,
+        };
+    },
+
+    // The same rule on the metered path. Saying "paused" while the unit keeps
+    // replicating is worse than silence: the user reads it as "safe to stay on
+    // mobile data", which is the one thing the guard exists to prevent.
+    async 'failed-metered-stop'(options) {
+        const opts = {...options, unitRunning: true};
+        const {log, networkMonitor} = await buildExtension(opts);
+        log.subprocesses.length = 0;
+        log.notifications.length = 0;
+        log.errors.length = 0;
+
+        opts.systemctlFails = true;
+        networkMonitor.metered = true;
+        networkMonitor.emit('notify::network-metered');
+        await settle();
+        return {verbs: verbs(log), notifications: log.notifications, errors: log.errors};
+    },
+
+    // checkStatus' own probe: which command it runs and what it concludes. The
+    // poll fires this on a timer, so the command has to stay cheap.
+    async 'status-probe'(options) {
+        const {indicator, log} = await build(options);
+        await indicator.checkStatus();
+        await settle();
+        return {
+            statusArgv: log.statusArgv ?? null,
+            statusSubprocesses: log.statusSubprocesses,
+            widgets: widgetState(indicator),
             errors: log.errors,
         };
     },
 
     // A metered network arrives while sharing is on, then leaves again. Both
-    // transitions must run the same verb set as the manual toggle.
+    // edges must run the same verb set as the equivalent manual toggle.
     async 'metered-transition'(options) {
-        const {indicator, log} = await build(options);
-        indicator._toggle.checked = options.checked ?? true;
-        indicator._pausedForMetered = options.pausedForMetered ?? false;
+        const {indicator, log, networkMonitor} = await buildExtension({
+            ...options,
+            unitRunning: options.unitRunning ?? true,
+        });
+        if (options.checked !== undefined)
+            indicator._toggle.checked = options.checked;
+        if (options.pausedForMetered !== undefined)
+            indicator._pausedForMetered = options.pausedForMetered;
+        log.systemctl.length = 0;
+        log.notifications.length = 0;
 
-        log.setMetered(true);
+        networkMonitor.metered = true;
+        networkMonitor.emit('notify::network-metered');
         await settle();
         const paused = {
             systemctl: [...log.systemctl],
             notifications: [...log.notifications],
             pausedForMetered: indicator._pausedForMetered,
+            toggle: toggleState(indicator),
         };
 
         log.systemctl.length = 0;
         log.notifications.length = 0;
 
-        log.setMetered(false);
+        networkMonitor.metered = false;
+        networkMonitor.emit('notify::network-metered');
         await settle();
         const resumed = {
             systemctl: [...log.systemctl],
             notifications: [...log.notifications],
             pausedForMetered: indicator._pausedForMetered,
+            toggle: toggleState(indicator),
         };
 
         return {paused, resumed, errors: log.errors};
     },
 
-    // Turning the toggle on over a metered link: the request is refused now and
-    // remembered, so the next unmetered transition honours it.
+    // Turning the toggle on over a metered link: refused now, remembered, and
+    // honoured by the next unmetered transition.
     async 'metered-click-then-unmeter'(options) {
-        const {indicator, log} = await build({...options, metered: true});
+        const {indicator, log, networkMonitor} = await buildExtension({
+            ...options,
+            metered: true,
+        });
+        log.systemctl.length = 0;
+        log.notifications.length = 0;
+
         indicator._toggle.checked = true;
-        await indicator._toggle._handlers.get('clicked')();
+        await indicator._toggle.emit('clicked');
         await settle();
         const refused = {
             systemctl: [...log.systemctl],
+            generate: [...log.generate],
             notifications: [...log.notifications],
             checked: indicator._toggle.checked,
             pausedForMetered: indicator._pausedForMetered,
@@ -773,7 +1156,8 @@ const scenarios = {
         log.systemctl.length = 0;
         log.notifications.length = 0;
 
-        log.setMetered(false);
+        networkMonitor.metered = false;
+        networkMonitor.emit('notify::network-metered');
         await settle();
         return {
             refused,
@@ -807,18 +1191,21 @@ const scenarios = {
 
     // disable() destroys the quick settings items before the indicator, so a
     // status callback arriving afterwards must not reach updateStatus().
-    // Cancelling does not drop that callback — GIO delivers it either with
-    // G_IO_ERROR_CANCELLED (options.release 'cancelled') or, when the child had
-    // already answered, successfully (options.release 'ok'). Both land after
-    // destroy(); both must leave the widgets alone.
+    // options.release picks the delivery: 'cancelled' is G_IO_ERROR_CANCELLED,
+    // 'ok' is the child having answered before force_exit landed.
     async 'destroy-during-status'(options) {
-        const {indicator, log} = await build({...options, deferStatus: true});
+        const {extension, indicator, log} = await buildExtension({
+            ...options,
+            deferStatus: true,
+        });
         const pending = indicator.checkStatus();
         await settle();
-        const before = snapshotWidgets(indicator);
+        const before = widgetState(indicator);
 
-        indicator.destroy();
-        const forceExitsAfterCancel = log.forceExits.map(argv => argv[0]);
+        extension.disable();
+        const forceExitsAfterCancel = log.subprocesses
+            .filter(call => call.forcedExit)
+            .map(call => call.argv[0]);
 
         log.releaseStatus(options.release ?? 'cancelled');
         await pending;
@@ -826,28 +1213,30 @@ const scenarios = {
 
         return {
             before,
-            after: snapshotWidgets(indicator),
-            forceExitsAfterCancel,
-            leakedCancellableHandlers: log.cancellableHandlers,
+            after: widgetState(indicator),
+            forceExitsAfterCancel: [...new Set(forceExitsAfterCancel)],
             errors: log.errors,
         };
     },
 
-    // destroy() lands while `syncthing generate` is still running. Neither the
-    // rest of the seeding nor the rest of the click may resume afterwards.
+    // disable() lands while `syncthing generate` is still running: neither the
+    // config rewrite nor the systemctl sequence behind it may resume.
     async 'destroy-during-seed'(options) {
-        const {indicator, log} = await build({
+        const {extension, indicator, log} = await buildExtension({
             configExists: false,
             syncDirExists: false,
             deferGenerate: true,
             ...options,
         });
+        log.systemctl.length = 0;
+        log.notifications.length = 0;
+
         indicator._toggle.checked = true;
-        const pending = indicator._toggle._handlers.get('clicked')();
+        const pending = indicator._toggle.emit('clicked');
         await settle();
         const generateStarted = log.generate.length;
 
-        indicator.destroy();
+        extension.disable();
         log.releaseGenerate();
         await pending;
         await settle();
@@ -856,53 +1245,42 @@ const scenarios = {
             generateStarted,
             systemctl: log.systemctl,
             writtenPaths: log.fs.writes.map(write => write.path),
-            forceExits: log.forceExits.map(argv => argv[0]),
-            widgets: snapshotWidgets(indicator),
+            forceExits: [
+                ...new Set(
+                    log.subprocesses.filter(call => call.forcedExit).map(call => call.argv[0]),
+                ),
+            ],
+            notifications: log.notifications,
             errors: log.errors,
         };
     },
 
-    // destroy() lands while the start verb itself is still outstanding: the
-    // status refresh chained behind it must never spawn.
+    // disable() lands while the start verb itself is outstanding: the status
+    // refresh chained behind it must never spawn.
     async 'destroy-during-systemctl'(options) {
-        const {indicator, log} = await build({...options, deferSystemctl: true});
-        indicator._toggle.checked = true;
-        const pending = indicator._toggle._handlers.get('clicked')();
-        await settle();
-        const started = [...log.systemctl];
+        const {extension, indicator, log} = await buildExtension({
+            ...options,
+            deferSystemctl: true,
+        });
+        log.systemctl.length = 0;
+        log.notifications.length = 0;
+        log.statusSubprocesses = 0;
 
-        indicator.destroy();
+        indicator._toggle.checked = true;
+        const pending = indicator._toggle.emit('clicked');
+        await settle();
+        const started = log.systemctl.map(argv => argv[2]);
+
+        extension.disable();
         log.releaseSystemctl();
         await pending;
         await settle();
 
         return {
             started,
-            systemctl: log.systemctl,
+            verbs: log.systemctl.map(argv => argv[2]),
             statusSubprocesses: log.statusSubprocesses,
-            forceExits: log.forceExits.map(argv => argv[0]),
-            widgets: snapshotWidgets(indicator),
-            errors: log.errors,
-        };
-    },
-
-    // The same window later on the click path: destroy() lands while the
-    // status refresh behind the start verb is still outstanding.
-    async 'destroy-during-click'(options) {
-        const {indicator, log} = await build({...options, deferStatus: true});
-        indicator._toggle.checked = true;
-        const pending = indicator._toggle._handlers.get('clicked')();
-        await settle();
-
-        indicator.destroy();
-        log.releaseStatus('cancelled');
-        await pending;
-        await settle();
-
-        return {
-            widgets: snapshotWidgets(indicator),
-            systemctl: log.systemctl,
-            forceExits: log.forceExits.map(argv => argv[0]),
+            notifications: log.notifications,
             errors: log.errors,
         };
     },

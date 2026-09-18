@@ -25,7 +25,9 @@ import { ServiceIndicator } from './toggle.js'
 export default class SyncthingToggleExtension extends Extension {
 	enable() {
 		this._indicator = new ServiceIndicator(this)
-		this._indicator.checkStatus()
+		// Not just checkStatus(): the session may be starting on a metered
+		// connection with the unit already running, which emits no signal.
+		this._indicator.reconcile()
 		Main.panel.statusArea.quickSettings.addExternalIndicator(this._indicator)
 	}
 

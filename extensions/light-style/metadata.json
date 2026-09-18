@@ -1,0 +1,15 @@
+{
+  "uuid": "light-style@projectbluefin.io",
+  "name": "Bluefin Light Style",
+  "description": "Follows the desktop color-scheme setting so GNOME Shell itself switches to its light theme, and gives Dash to Dock's running dot the user's accent colour",
+  "shell-version": [
+    "45",
+    "46",
+    "47",
+    "48",
+    "49",
+    "50"
+  ],
+  "url": "https://github.com/projectbluefin/bluefin-bling",
+  "version": 1
+}

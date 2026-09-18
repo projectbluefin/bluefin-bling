@@ -1,0 +1,20 @@
+/* Light Style — supplementary rules only.
+ *
+ * The extension's actual work is flipping Main.sessionMode.colorScheme, which
+ * makes GNOME Shell load gnome-shell-light.css. That sheet already themes
+ * #panel, .dash-background, .show-apps-icon, #overviewGroup, .overview-tile,
+ * .grid-search-result, .search-entry, .app-folder, .app-folder-dialog and the
+ * page indicators for a light session. Restating any of that here with fixed
+ * hex only fights the theme we just asked the Shell to load, and drifts the
+ * moment Adwaita changes — so those overrides are deliberately absent.
+ *
+ * What remains is the one thing the stock sheet does not express: Dash to
+ * Dock's running dot follows the foreground colour, not the user's accent.
+ * Since GNOME 47 the accent is user-selectable and St exposes it to extension
+ * stylesheets as -st-accent-color; on GNOME 45/46 the declaration is simply
+ * dropped and the dot keeps the shell default, which is the right failure.
+ */
+
+.light-style-active #dashtodockContainer #dash .app-grid-running-dot {
+    background-color: -st-accent-color;
+}
