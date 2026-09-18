@@ -425,6 +425,32 @@ class TestSyncthingToggleDisable(unittest.TestCase):
             "cancellable accumulates one per status poll",
         )
 
+    def test_a_call_that_succeeded_before_disable_is_not_announced_after(self):
+        """Cancelling a Cancellable does not drop the pending callback.
+
+        `systemctl start` can succeed and the status re-read still be in flight
+        when the extension is disabled — a screen lock, an extension update.
+        The continuation after that await resumes against torn-down widgets, so
+        it must re-check the destroyed flag rather than post "Sharing Enabled"
+        for an extension that is gone, or persist it with `enable`.
+        """
+        result = run_scenario("disable-mid-click")
+        self.assertEqual(
+            result["startedBeforeDisable"],
+            ["start"],
+            "the scenario disabled before the start even ran",
+        )
+        self.assertEqual(
+            result["notifications"],
+            [],
+            f"a disabled extension still notified: {result['notifications']}",
+        )
+        self.assertEqual(
+            [argv[2] for argv in result["systemctl"]],
+            ["start"],
+            "teardown did not stop the click handler from persisting the choice",
+        )
+
     def test_a_cancelled_callback_never_touches_the_dead_widgets(self):
         # Cancelling a Cancellable does not drop the callback: it still fires,
         # with G_IO_ERROR_CANCELLED, after the widgets are gone.

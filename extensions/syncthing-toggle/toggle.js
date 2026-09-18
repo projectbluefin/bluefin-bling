@@ -115,7 +115,10 @@ export var ServiceIndicator = GObject.registerClass(
 					serviceName
 				)
 				await this.checkStatus()
-				if (!started)
+				// Cancelling the cancellable does not drop a pending async
+				// callback, so the awaits above still resolve after destroy().
+				// Never announce anything on behalf of a torn-down extension.
+				if (this._destroyed || !started)
 					return
 
 				Main.notify(
@@ -194,7 +197,7 @@ export var ServiceIndicator = GObject.registerClass(
 			// Syncthing keeps replicating over it.
 			const stopped = await this._runSystemctl('stop', serviceName)
 			await this.checkStatus()
-			if (!stopped)
+			if (this._destroyed || !stopped)
 				return
 
 			Main.notify(

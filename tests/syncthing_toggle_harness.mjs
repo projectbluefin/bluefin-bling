@@ -763,6 +763,34 @@ const scenarios = {
         return result;
     },
 
+    // disable() lands in the window between a systemctl call that succeeded and
+    // the notification it would justify.
+    async 'disable-mid-click'(options) {
+        const {extension, indicator, log} = await buildExtension(options);
+        log.subprocesses.length = 0;
+        log.systemctl.length = 0;
+        log.notifications.length = 0;
+        log.statusSubprocesses = 0;
+
+        indicator._toggle.checked = true;
+        const clicked = indicator._toggle.emit('clicked');
+        // Wait for `start` to have succeeded and the status re-read to be in
+        // flight, then tear the extension down under it.
+        for (let i = 0; i < 50 && log.statusSubprocesses === 0; i++)
+            await Promise.resolve();
+        const startedBeforeDisable = log.systemctl.map(argv => argv[2]);
+        extension.disable();
+        await clicked;
+        await settle();
+
+        return {
+            startedBeforeDisable,
+            systemctl: log.systemctl,
+            notifications: log.notifications,
+            subtitle: indicator._toggle.subtitle,
+        };
+    },
+
     // systemctl can refuse: a missing unit, a masked unit, a failing ExecStart.
     // Announcing the new state before the call means claiming "sharing enabled"
     // for a service that never came up, and `enable` would make it stick.
