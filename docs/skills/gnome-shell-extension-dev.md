@@ -1,17 +1,23 @@
 ---
 name: gnome-shell-extension-dev
-version: "1.0"
-last_updated: "2026-09-06"
+version: "1.1"
+last_updated: "2026-09-18"
 id: gnome-shell-extension-dev
 one_line_purpose: Development, architecture, and lifecycle rules for modern GNOME Shell extensions.
 entry_point: docs/skills/gnome-shell-extension-dev.md
+# category: intentionally outside common's ci-ops|test-authoring|meta enum.
+# This is a GNOME-extensions repo; none of the three fit. Tracked upstream.
 category: architecture
+mcp_compliance_level: partial
+optimization_status: draft
 status: active
+dependencies: []
 tags: [gnome, extensions, esm, bootc, gjs]
 description: >-
-  Standard practices for writing GNOME Shell extensions (45+ ESM) in Bluefin.
-  Covers the Extension class lifecycle, Gio.Subprocess execution, cancellation
-  hygiene, pure bootc integration, and CSS styling without leaks.
+  Standard practices for writing GNOME Shell extensions (45+ ESM) in Bluefin:
+  the Extension lifecycle, Gio.Subprocess execution, cancellation hygiene,
+  bootc integration, and CSS without leaks. Use when creating or modifying
+  anything under extensions/.
 metadata:
   type: reference
   context7-sources:
@@ -23,6 +29,14 @@ metadata:
 # GNOME Shell Extension Development (GNOME 45+)
 
 Bluefin extensions target modern GNOME Shell releases (GNOME 45 through 50+) using native ECMAScript Modules (ESM). Deprecated `imports.*` and legacy extension interfaces are prohibited.
+
+## When to Use
+
+- Creating or modifying anything under `extensions/`.
+- Writing `enable()` / `disable()`, or chasing a leak on disable.
+- Running a subprocess, doing file I/O, or using a `Gio.Cancellable` from Shell.
+- Reading bootc system state.
+- Adding or changing CSS applied to Shell widgets.
 
 ---
 
@@ -115,4 +129,44 @@ Before committing:
 node --check extensions/<extension>/extension.js
 python3 -m json.tool extensions/<extension>/metadata.json > /dev/null
 glib-compile-schemas --strict extensions/<extension>/schemas/
+```
+
+The per-file form above is for spot-checking one extension while iterating. The
+authoritative gate is the discovery-based suite — see
+[`extension-validation.md`](./extension-validation.md), which runs over every
+extension with no hardcoded list.
+
+## Red Flags
+
+- **Synchronous I/O anywhere in the Shell process.** `query_exists(null)`,
+  `load_contents(null)`, `replace_contents(..., null)`, and
+  `GLib.find_program_in_path()` all block. On NFS, autofs, sshfs, or a
+  spun-down disk they freeze the entire compositor, not just your menu. Use the
+  `_async` variants.
+- **An unguarded continuation after `await`.** Cancelling a `Gio.Cancellable`
+  does not drop the callback — it invokes it with `G_IO_ERROR_CANCELLED`. If
+  `disable()` already ran, the continuation touches finalized St widgets and
+  raises "already deallocated". Re-check your destroyed flag *after* every
+  `await`, not only before.
+- **Assuming a cancellable kills the child process.** It aborts the local stream
+  read only. Connect to the cancellable and call `proc.force_exit()`.
+- **`logError('message', err)`.** The GJS signature is
+  `logError(error, prefix)` — error first. Swapped arguments lose the stack trace.
+- **Interpolating a settings value into a command line.** Settings are
+  dconf-writable by any same-uid process. Validate, then pass as a discrete argv
+  entry — and reject a leading `-`, or `systemctl` parses it as an option.
+- **Hardcoded accent colours.** Since GNOME 47 the accent is user-selectable;
+  use the `-st-accent-color` keyword instead of a literal like `#3584e4`.
+
+## Verification
+
+```bash
+# Which GNOME versions do we actually target?
+python3 -c "import json,glob; [print(f, json.load(open(f))['shell-version']) for f in glob.glob('extensions/*/metadata.json')]"
+
+# Teardown hygiene is machine-checked; see which rules exist
+grep -n "def test_" tests/test_extension_sources.py
+
+# Confirm an API against upstream rather than memory
+#   Context7: /git_gitlab_gnome_org/gnome_gnome-shell, /websites/gjs-docs_gnome
 ```

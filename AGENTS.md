@@ -20,11 +20,16 @@ Parent factory: [projectbluefin/common](https://github.com/projectbluefin/common
 4. Validate changes before commit   # node --check, glib-compile-schemas, json validation
 ```
 
-**Doc-only changes** (`docs/`, `AGENTS.md`, `README.md`) → push directly to `main`.
-```bash
-git diff --cached --name-only   # confirm only docs/*, AGENTS.md, or README.md
+**Everything goes through a PR, including doc-only changes.** There is no direct
+push to `main` — the ruleset rejects it:
 ```
-**Everything else** → feature branch + PR targeting `main`.
+remote: - Changes must be made through a pull request.
+remote: - Changes must be made through the merge queue.
+remote: - Required status check "validate extensions (...)" is expected.
+```
+Branch, open a PR against `main`, get two write-permission approvals, and let the
+merge queue land it. See
+[`docs/skills/pr-review-and-merge.md`](docs/skills/pr-review-and-merge.md).
 
 ---
 
@@ -48,8 +53,13 @@ bluefin-bling/
 │   ├── SKILL.md               # Task → skill router
 │   └── skills/                # Authoritative operational knowledge
 ├── tests/                     # Discovery-based validation suite (stdlib unittest)
+├── .github/
+│   └── workflows/ci.yml       # Runs the validation suite on every PR and on main
+├── AGENTS.md
 ├── README.md
-└── AGENTS.md
+├── SECURITY.md
+├── renovate.json
+└── .gitignore
 ```
 
 **Rule:** Every extension lives under its own folder inside `extensions/` with its own `metadata.json`. Monorepo root is reserved for docs, CI, and tooling.
@@ -58,7 +68,7 @@ bluefin-bling/
 
 ## Context7 — Mandatory for All Platform & Library Work
 
-Use `context7-resolve-library-id` + `context7-query-docs` **before writing any code** that touches:
+Use `resolve-library-id` + `query-docs` **before writing any code** that touches:
 - GNOME Shell extension APIs (`/git_gitlab_gnome_org/gnome_gnome-shell`)
 - GJS / GNOME JavaScript APIs (`/websites/gjs-docs_gnome`)
 - GNOME HIG and developer documentation (`/websites/developer_gnome`)
@@ -136,15 +146,22 @@ python3 -m unittest discover -s tests -t tests -v
 Standard library only — no dependencies to install. It enforces `metadata.json`
 invariants (uuid ↔ folder name, shell-version, settings-schema), GSettings schema
 correctness (id ↔ metadata, path convention, no unknown or dead keys), `node --check`
-on every JS source, and `disable()` teardown hygiene. See
+on every JS source, `disable()` teardown hygiene, and that every CSS class a source
+applies has a rule in each stylesheet GNOME Shell would actually load for that
+extension — Shell reads `stylesheet.css` and its variant siblings from the extension
+root only, and loads exactly one of them. See
 [`docs/skills/extension-validation.md`](docs/skills/extension-validation.md).
 
-There is no CI gate yet — run the suite locally before every PR. Also compile the
-schemas:
+`.github/workflows/ci.yml` runs this same suite on every pull request and on
+every push to `main`. Run it locally first anyway. Also compile the schemas the
+way CI does — it loops over every extension, so do not name one by hand:
 
 ```bash
-# Compile and validate GSettings schemas
-glib-compile-schemas --strict --dry-run extensions/syncthing-toggle/schemas/
+# Compile and validate GSettings schemas for every extension that ships them
+shopt -s nullglob
+for dir in extensions/*/schemas/; do
+  glib-compile-schemas --strict --dry-run "$dir"
+done
 ```
 
 ---
@@ -160,6 +177,18 @@ docs(skills): document GNOME 45+ cancellable subprocess cleanup
 ```
 
 Types: `feat` `fix` `docs` `ci` `refactor` `chore` `build` `perf` `test`
+
+### Review and Merge
+
+`main` requires **two approving reviews from accounts with write permission** plus
+the `validate extensions (tests, node --check, glib-compile-schemas)` check, and
+merges through a **merge queue** with squash. Approvals from read-only
+collaborators look identical in the UI and count for nothing, and the merge queue
+needs a `merge_group:` trigger in `ci.yml` or nothing can ever merge.
+
+Before approving or merging anything, read
+[`docs/skills/pr-review-and-merge.md`](docs/skills/pr-review-and-merge.md). Never
+admin-merge past a review requirement.
 
 ### AI Attribution
 
