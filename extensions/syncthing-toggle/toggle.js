@@ -9,7 +9,165 @@ import {
 import * as Main from 'resource:///org/gnome/shell/ui/main.js'
 import { gettext as _ } from 'resource:///org/gnome/shell/extensions/extension.js'
 
-const statusPattern = /(\(running\))/
+// `systemctl --user is-active` answers straight from the manager and prints one
+// word. `status` additionally pages in the journal, which costs roughly 27ms a
+// call — unaffordable for a background poll in a feature whose whole point is
+// saving battery and data.
+const ACTIVE_STATE = 'active'
+
+// The background poll only has to notice state that changed behind our back: a
+// manual `systemctl`, a crash, a resume. Every path the user can actually see —
+// clicking the toggle, an automatic metered transition, enable() — refreshes
+// immediately, so this can be slow.
+const POLL_INTERVAL_SECONDS = 60
+
+const XML_ENTITIES = {
+	'&': '&amp;',
+	'<': '&lt;',
+	'>': '&gt;',
+	'"': '&quot;',
+	"'": '&apos;',
+}
+
+// $HOME is whatever the account says it is. An unescaped &, " or < in the path
+// produces a config.xml that Syncthing refuses to parse.
+function escapeXmlAttribute(value) {
+	return String(value).replace(/[&<>"']/g, character => XML_ENTITIES[character])
+}
+
+// A cancellable aborts the local stream read only; the child process keeps
+// running unless it is killed. See docs/skills/gnome-shell-extension-dev.md.
+function connectForceExit(proc, cancellable) {
+	if (!cancellable)
+		return () => {}
+
+	const handlerId = cancellable.connect(() => {
+		try {
+			proc.force_exit()
+		} catch {}
+	})
+	return () => cancellable.disconnect(handlerId)
+}
+
+function waitCheckAsync(argv, cancellable) {
+	return new Promise((resolve, reject) => {
+		const proc = Gio.Subprocess.new(argv, Gio.SubprocessFlags.NONE)
+		const release = connectForceExit(proc, cancellable)
+		proc.wait_check_async(cancellable, (source, res) => {
+			release()
+			try {
+				source.wait_check_finish(res)
+				resolve()
+			} catch (e) {
+				reject(e)
+			}
+		})
+	})
+}
+
+function communicateUtf8Async(argv, cancellable) {
+	return new Promise((resolve, reject) => {
+		const proc = Gio.Subprocess.new(argv, Gio.SubprocessFlags.STDOUT_PIPE)
+		const release = connectForceExit(proc, cancellable)
+		proc.communicate_utf8_async(null, cancellable, (source, res) => {
+			release()
+			try {
+				const [, stdout] = source.communicate_utf8_finish(res)
+				resolve(stdout)
+			} catch (e) {
+				reject(e)
+			}
+		})
+	})
+}
+
+// query_exists(null) blocks the compositor on NFS, autofs or a spun-down disk.
+function queryExistsAsync(file, cancellable) {
+	return new Promise(resolve => {
+		file.query_info_async(
+			'standard::type',
+			Gio.FileQueryInfoFlags.NONE,
+			GLib.PRIORITY_DEFAULT,
+			cancellable,
+			(source, res) => {
+				try {
+					source.query_info_finish(res)
+					resolve(true)
+				} catch {
+					resolve(false)
+				}
+			}
+		)
+	})
+}
+
+// GIO ships no make_directory_with_parents_async, and the synchronous form
+// blocks. Walk up to the first ancestor that exists, then create downwards.
+async function makeDirectoryWithParentsAsync(file, cancellable) {
+	const missing = []
+	for (let dir = file; dir; dir = dir.get_parent()) {
+		if (await queryExistsAsync(dir, cancellable))
+			break
+		missing.unshift(dir)
+	}
+
+	for (const dir of missing) {
+		await new Promise((resolve, reject) => {
+			dir.make_directory_async(GLib.PRIORITY_DEFAULT, cancellable, (source, res) => {
+				try {
+					source.make_directory_finish(res)
+					resolve()
+				} catch (e) {
+					// Another writer won the race; the directory is there.
+					if (e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.EXISTS))
+						resolve()
+					else
+						reject(e)
+				}
+			})
+		})
+	}
+}
+
+function loadContentsAsync(file, cancellable) {
+	return new Promise((resolve, reject) => {
+		file.load_contents_async(cancellable, (source, res) => {
+			try {
+				const [, contents] = source.load_contents_finish(res)
+				resolve(new TextDecoder('utf-8').decode(contents))
+			} catch (e) {
+				reject(e)
+			}
+		})
+	})
+}
+
+function replaceContentsAsync(file, text, cancellable) {
+	return new Promise((resolve, reject) => {
+		// replace_contents_bytes_async, not replace_contents_async: GJS cannot
+		// keep a plain byte array alive across the call.
+		//
+		// PRIVATE, never REPLACE_DESTINATION. config.xml carries <apikey>,
+		// which is full control of the local REST API; REPLACE_DESTINATION
+		// creates a fresh inode, so a 0600 file comes back 0644 under the
+		// default umask and a symlinked config is replaced rather than followed.
+		file.replace_contents_bytes_async(
+			GLib.Bytes.new(new TextEncoder().encode(text)),
+			null,
+			false,
+			Gio.FileCreateFlags.PRIVATE,
+			cancellable,
+			(source, res) => {
+				try {
+					source.replace_contents_finish(res)
+					resolve()
+				} catch (e) {
+					reject(e)
+				}
+			}
+		)
+	})
+}
 
 const ServiceToggle = GObject.registerClass(
 	class ServiceToggle extends QuickMenuToggle {
@@ -29,7 +187,8 @@ const ServiceToggle = GObject.registerClass(
 			// Add a section of items to the menu
 			this._itemsSection = new PopupMenu.PopupMenuSection()
 			this.webGuiItem = this._itemsSection.addAction(_('Open Web GUI'), () => {
-				// Open the URL in the default browser
+				// 127.0.0.1, not localhost: the seeded config binds the GUI to
+				// the IPv4 loopback, and localhost can resolve to ::1 first.
 				const webGuiUrl = 'http://127.0.0.1:' + this._settings.get_int('port')
 				try {
 					Gio.app_info_launch_default_for_uri(webGuiUrl, null)
@@ -63,6 +222,10 @@ export var ServiceIndicator = GObject.registerClass(
 			this._timer = null
 			this._networkMonitor = null
 			this._meteredSignalId = 0
+			// True only while the metered handler is holding sharing off. It is
+			// the permission to resume: a network change must never restart
+			// sharing the user turned off by hand.
+			this._pausedForMetered = false
 			this._cancellable = new Gio.Cancellable()
 
 			let iconName =
@@ -82,15 +245,24 @@ export var ServiceIndicator = GObject.registerClass(
 				if (!serviceName)
 					return
 
+				// An explicit click overrides whatever the metered handler
+				// decided, in both directions.
+				this._pausedForMetered = false
+
 				if (isEnabled) {
-					// Seed initial configuration and ensure ~/Sync exists asynchronously
+					// Seed initial configuration and ensure ~/Sync exists.
 					await this._ensureSyncFolderConfig()
-					// Check metered network constraint
+					if (this._destroyed)
+						return
+
 					if (this._isNetworkMetered()) {
 						Main.notify(
 							_('Sync Folder Sharing Paused'),
 							_('Metered network connection detected. Syncing is paused.')
 						)
+						// Remember the request so returning to an unmetered
+						// network honours it instead of dropping it silently.
+						this._pausedForMetered = true
 						this._toggle.checked = false
 						return
 					}
@@ -105,20 +277,21 @@ export var ServiceIndicator = GObject.registerClass(
 
 				Main.notify(title, body)
 
-				await this._runSystemctl(!isEnabled ? 'stop' : 'start', serviceName)
-				await this.checkStatus()
-
-				// if the appropriate setting is enabled (default, also enable or disable the service)
-				if (!this._settings.get_boolean('start-stop-only'))
-					await this._runSystemctl(!isEnabled ? 'disable' : 'enable', serviceName)
+				await this._applySharing(isEnabled, serviceName)
 			})
 
-			// Set up periodic status polling (every 5 seconds)
-			this._timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 5, () => {
-				if (!this._destroyed)
+			this._timer = GLib.timeout_add_seconds(
+				GLib.PRIORITY_LOW,
+				POLL_INTERVAL_SECONDS,
+				() => {
+					if (this._destroyed) {
+						this._timer = null
+						return GLib.SOURCE_REMOVE
+					}
 					this.checkStatus()
-				return GLib.SOURCE_CONTINUE
-			})
+					return GLib.SOURCE_CONTINUE
+				}
+			)
 
 			// Listen for network metering changes
 			try {
@@ -130,7 +303,7 @@ export var ServiceIndicator = GObject.registerClass(
 					)
 				}
 			} catch (e) {
-				console.error(`[SyncthingToggle] Error connecting network monitor: ${e.message}`)
+				logError(e, 'Error connecting network monitor')
 			}
 		}
 
@@ -142,22 +315,55 @@ export var ServiceIndicator = GObject.registerClass(
 			}
 		}
 
+		// The one place that decides which systemctl verbs a sharing change
+		// runs. The metered handler goes through it too, so an automatic pause
+		// and a manual toggle-off leave the unit in exactly the same state —
+		// otherwise a metered pause left the unit enabled and it came back at
+		// the next login, on the same metered link.
+		async _applySharing(active, serviceName) {
+			await this._runSystemctl(active ? 'start' : 'stop', serviceName)
+			if (this._destroyed)
+				return
+
+			await this.checkStatus()
+			if (this._destroyed)
+				return
+
+			// if the appropriate setting is enabled (default, also enable or disable the service)
+			// not using enable --now because it's way slower and bugs the status.
+			if (!this._settings.get_boolean('start-stop-only'))
+				await this._runSystemctl(active ? 'enable' : 'disable', serviceName)
+		}
+
 		async _onNetworkMeteredChanged() {
 			if (this._destroyed)
 				return
 
 			const isMetered = this._isNetworkMetered()
-			if (isMetered && this._toggle.checked) {
-				Main.notify(
-					_('Sync Folder Sharing Paused'),
-					_('Metered connection detected. Pausing file sharing to save data.')
-				)
-				const serviceName = this._validatedServiceName()
-				if (serviceName) {
-					await this._runSystemctl('stop', serviceName)
-					await this.checkStatus()
-				}
+			if (isMetered) {
+				// Nothing to pause, or an earlier transition already paused it.
+				if (!this._toggle.checked || this._pausedForMetered)
+					return
+			} else if (!this._pausedForMetered) {
+				// Sharing is off because the user said so. Leave it off.
+				return
 			}
+
+			const serviceName = this._validatedServiceName()
+			if (!serviceName)
+				return
+
+			Main.notify(
+				isMetered
+					? _('Sync Folder Sharing Paused')
+					: _('Sync Folder Sharing Resumed'),
+				isMetered
+					? _('Metered connection detected. Pausing file sharing to save data.')
+					: _('Unmetered connection detected. Resuming file sharing.')
+			)
+
+			this._pausedForMetered = isMetered
+			await this._applySharing(!isMetered, serviceName)
 		}
 
 		async _ensureSyncFolderConfig() {
@@ -166,78 +372,75 @@ export var ServiceIndicator = GObject.registerClass(
 			const stateDir = `${homeDir}/.local/state/syncthing`
 			const port = this._settings.get_int('port') || 8384
 
-			// Ensure ~/Sync directory exists
-			const syncDirFile = Gio.File.new_for_path(syncDir)
-			if (!syncDirFile.query_exists(null)) {
-				try {
-					syncDirFile.make_directory_with_parents(null)
-				} catch (e) {
-					console.error(`[SyncthingToggle] Failed to create sync directory: ${e.message}`)
-				}
+			try {
+				await makeDirectoryWithParentsAsync(
+					Gio.File.new_for_path(syncDir),
+					this._cancellable
+				)
+			} catch (e) {
+				logError(e, 'Failed to create sync directory')
 			}
+			if (this._destroyed)
+				return
 
 			const configFile = Gio.File.new_for_path(`${stateDir}/config.xml`)
-			if (configFile.query_exists(null))
+			const alreadyConfigured = await queryExistsAsync(configFile, this._cancellable)
+			if (this._destroyed || alreadyConfigured)
 				return
 
-			const stateDirFile = Gio.File.new_for_path(stateDir)
-			if (!stateDirFile.query_exists(null)) {
-				try {
-					stateDirFile.make_directory_with_parents(null)
-				} catch (e) {
-					console.error(`[SyncthingToggle] Failed to create state directory: ${e.message}`)
-				}
-			}
-
-			// Locate syncthing binary
-			const syncthingBin = GLib.find_program_in_path('syncthing') || '/usr/bin/syncthing'
-
-			// Generate initial syncthing config offline asynchronously
 			try {
-				const proc = Gio.Subprocess.new(
-					[syncthingBin, 'generate', `--home=${stateDir}`, '--no-port-probing'],
-					Gio.SubprocessFlags.NONE
+				await makeDirectoryWithParentsAsync(
+					Gio.File.new_for_path(stateDir),
+					this._cancellable
 				)
-				await new Promise((resolve, reject) => {
-					proc.wait_check_async(this._cancellable, (source, res) => {
-						try {
-							source.wait_check_finish(res)
-							resolve()
-						} catch (e) {
-							reject(e)
-						}
-					})
-				})
 			} catch (e) {
-				console.error(`[SyncthingToggle] Failed to generate initial config: ${e.message}`)
+				logError(e, 'Failed to create state directory')
 				return
 			}
-			if (!configFile.query_exists(null))
+			if (this._destroyed)
+				return
+
+			// Plain 'syncthing': Gio.Subprocess resolves it from PATH inside the
+			// child, where GLib.find_program_in_path() would stat every PATH
+			// entry on the compositor thread.
+			try {
+				await waitCheckAsync(
+					['syncthing', 'generate', `--home=${stateDir}`, '--no-port-probing'],
+					this._cancellable
+				)
+			} catch (e) {
+				logError(e, 'Failed to generate initial syncthing config')
+				return
+			}
+			if (this._destroyed)
+				return
+
+			const generated = await queryExistsAsync(configFile, this._cancellable)
+			if (this._destroyed || !generated)
 				return
 
 			try {
-				const [, contents] = configFile.load_contents(null)
-				let xml = new TextDecoder('utf-8').decode(contents)
+				let xml = await loadContentsAsync(configFile, this._cancellable)
+				if (this._destroyed)
+					return
 
-				// Bind GUI to loopback
+				// Bind the GUI to loopback on the configured port.
 				xml = xml.replace(
 					/<address>127\.0\.0\.1:\d+<\/address>/,
 					`<address>127.0.0.1:${port}</address>`
 				)
 
-				// Extract local device ID
-				const devMatch = xml.match(/<device id="([^"]+)"/)
-				const myDevId = devMatch ? devMatch[1] : ''
-
-				// Enable autoAcceptFolders in default device template for zero-toil folder invitations
-				xml = xml.replace(
-					/(<device id=""[^>]*>[\s\S]*?<autoAcceptFolders>)false(<\/autoAcceptFolders>)/,
-					'$1true$2'
-				)
-
-				// Seed default ~/Sync folder
+				// Seed the default ~/Sync folder. The <defaults> device
+				// template is deliberately left alone: flipping auto-accept
+				// there hands every device paired later blanket authority to
+				// create folders under $HOME with no prompt, and it outlives
+				// the extension in config.xml. The seeded folder below is what
+				// the feature actually needs.
 				if (!xml.includes('id="sync"')) {
-					const folderXml = `    <folder id="sync" label="Sync Folder" path="${syncDir}" type="sendreceive" rescanIntervalS="3600" fsWatcherEnabled="true" fsWatcherDelayS="10" ignorePerms="false" autoNormalize="true">
+					// Extract local device ID
+					const devMatch = xml.match(/<device id="([^"]+)"/)
+					const myDevId = devMatch ? devMatch[1] : ''
+					const folderXml = `    <folder id="sync" label="Sync Folder" path="${escapeXmlAttribute(syncDir)}" type="sendreceive" rescanIntervalS="3600" fsWatcherEnabled="true" fsWatcherDelayS="10" ignorePerms="false" autoNormalize="true">
         <filesystemType>basic</filesystemType>
         <device id="${myDevId}" introducedBy=""></device>
         <minDiskFree unit="%">1</minDiskFree>
@@ -249,15 +452,9 @@ export var ServiceIndicator = GObject.registerClass(
 					xml = xml.replace('</configuration>', folderXml)
 				}
 
-				configFile.replace_contents(
-					new TextEncoder().encode(xml),
-					null,
-					false,
-					Gio.FileCreateFlags.REPLACE_DESTINATION,
-					null
-				)
+				await replaceContentsAsync(configFile, xml, this._cancellable)
 			} catch (e) {
-				console.error(`[SyncthingToggle] Failed to configure syncthing config: ${e.message}`)
+				logError(e, 'Failed to configure syncthing config')
 			}
 		}
 
@@ -277,20 +474,10 @@ export var ServiceIndicator = GObject.registerClass(
 
 		async _runSystemctl(verb, serviceName) {
 			try {
-				const proc = Gio.Subprocess.new(
+				await waitCheckAsync(
 					['systemctl', '--user', verb, serviceName],
-					Gio.SubprocessFlags.NONE
+					this._cancellable
 				)
-				await new Promise((resolve, reject) => {
-					proc.wait_check_async(this._cancellable, (proc, res) => {
-						try {
-							proc.wait_check_finish(res)
-							resolve()
-						} catch (e) {
-							reject(e)
-						}
-					})
-				})
 			} catch (e) {
 				logError(e, `Failed to run systemctl ${verb}`)
 			}
@@ -306,34 +493,21 @@ export var ServiceIndicator = GObject.registerClass(
 					this.updateStatus(false)
 					return
 				}
-				const proc = Gio.Subprocess.new(
-					[
-						'systemctl',
-						'--user',
-						'status',
-						serviceName,
-					],
-					Gio.SubprocessFlags.STDOUT_PIPE
+
+				const stdout = await communicateUtf8Async(
+					['systemctl', '--user', 'is-active', serviceName],
+					this._cancellable
 				)
+				// Cancelling does not drop this callback — it fires with
+				// G_IO_ERROR_CANCELLED, by which point disable() has already
+				// finalized the St widgets updateStatus() writes to.
+				if (this._destroyed)
+					return
 
-				const stdout = await new Promise((resolve, _reject) => {
-					proc.communicate_utf8_async(null, this._cancellable, (proc, res) => {
-						try {
-							let [, stdout] = proc.communicate_utf8_finish(res)
-							resolve(stdout)
-						} catch {
-							resolve(null)
-						}
-					})
-				})
-
-				if (stdout) {
-					const status = statusPattern.exec(stdout)?.[1]
-					this.updateStatus(status == '(running)')
-				} else {
-					this.updateStatus(false)
-				}
+				this.updateStatus(stdout?.trim() === ACTIVE_STATE)
 			} catch (err) {
+				if (this._destroyed)
+					return
 				this.updateStatus(false)
 				logError(err, 'Err checking status')
 			}
