@@ -136,8 +136,10 @@ This repository follows standard Project Bluefin practices:
 - **Authoritative Agent Instructions:** [`AGENTS.md`](AGENTS.md)
 - **Skill Router:** [`docs/SKILL.md`](docs/SKILL.md)
 - **Skills Catalog:** [`docs/skills/`](docs/skills/)
+  - [`extension-validation.md`](docs/skills/extension-validation.md)
   - [`factory-onboarding.md`](docs/skills/factory-onboarding.md)
-  - [`skill-improvement.md`](docs/skills/skill-improvement.md)
   - [`gnome-shell-extension-dev.md`](docs/skills/gnome-shell-extension-dev.md)
+  - [`pr-review-and-merge.md`](docs/skills/pr-review-and-merge.md)
   - [`quick-settings-integration.md`](docs/skills/quick-settings-integration.md)
+  - [`skill-improvement.md`](docs/skills/skill-improvement.md)
 
