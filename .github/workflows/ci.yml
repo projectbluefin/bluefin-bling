@@ -14,15 +14,16 @@ on:
   # context never reports, and every queued PR sits in AWAITING_CHECKS until
   # check_response_timeout_minutes expires and the entry is dropped.
   merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
 permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  # Never cancel a merge-queue run: it is the only thing that can satisfy the
-  # required check for that entry, and a cancelled run re-deadlocks the queue.
-  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+  # Safe for merge_group: each queue entry gets its own temporary ref, so this
+  # only cancels a run whose SHA the queue has already superseded.
+  cancel-in-progress: true
 
 jobs:
   extension-validation:
