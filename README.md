@@ -13,6 +13,11 @@ bluefin-bling/
 ├── .github/
 │   └── workflows/ci.yml       # Runs the validation suite on every PR and on main
 ├── extensions/
+│   ├── light-style/           # Follows the desktop color-scheme into GNOME Shell's light theme
+│   │   ├── metadata.json
+│   │   ├── extension.js
+│   │   ├── stylesheet.css
+│   │   └── COPYING
 │   ├── power-status-color/    # Quick Settings power button status styling
 │   │   ├── metadata.json
 │   │   ├── extension.js
@@ -77,6 +82,20 @@ A Quick Settings toggle for Bluefin's built-in Sync Folder peer sharing service.
   - **Disabled:** *"Sync Folder Sharing Disabled — File sharing is paused."*
 - **Submenu Actions:** Quick link to open the Syncthing Web GUI directly in the default browser.
 
+### 3. `light-style` (Light Style Follower)
+
+**UUID:** `light-style@projectbluefin.io`  
+**Display name:** Bluefin Light Style — deliberately distinct from the upstream `light-style@gnome-shell-extensions.gcampax.github.com` extension, which presents as plain "Light Style".  
+**Compatibility:** GNOME Shell 45, 46, 47, 48, 49, 50+
+
+Makes GNOME Shell itself follow the desktop light/dark preference, rather than
+repainting the Shell from the extension:
+
+- **Dynamic Theme Tracking:** Watches `org.gnome.desktop.interface color-scheme` and re-syncs live, with no Shell restart.
+- **Session Mode Handover:** Sets `Main.sessionMode.colorScheme` to `prefer-light`, which is what makes the Shell load its own `gnome-shell-light.css`. Panel, dash, overview, search entry and app folders are then themed by Adwaita, not by hex in this repo.
+- **Accent-Aware Dock Dot:** The one supplementary rule — Dash to Dock's running dot uses `-st-accent-color` (GNOME 47+) instead of the foreground colour. On 45/46 the declaration is dropped and the dot keeps the Shell default.
+- **Non-Destructive Teardown:** `enable()` records the session's existing `colorScheme` and `disable()` restores exactly that value, so a custom `/usr/share/gnome-shell/modes/*.json` — which Bluefin and Dakota ship — survives an enable/disable cycle. The `.light-style-active` class is removed from `Main.uiGroup` synchronously.
+
 ---
 
 ## Installation & Development
@@ -84,6 +103,12 @@ A Quick Settings toggle for Bluefin's built-in Sync Folder peer sharing service.
 ### Local Installation
 
 Install an extension directly into your user's GNOME Shell extension directory:
+
+#### Install Light Style
+```bash
+mkdir -p ~/.local/share/gnome-shell/extensions/light-style@projectbluefin.io
+cp -r extensions/light-style/* ~/.local/share/gnome-shell/extensions/light-style@projectbluefin.io/
+```
 
 #### Install Power Status Color
 ```bash
@@ -101,6 +126,7 @@ glib-compile-schemas ~/.local/share/gnome-shell/extensions/syncthing-toggle@proj
 ### Enable Extensions
 
 ```bash
+gnome-extensions enable light-style@projectbluefin.io
 gnome-extensions enable power-status-color@projectbluefin.io
 gnome-extensions enable syncthing-toggle@projectbluefin.io
 ```
@@ -108,6 +134,7 @@ gnome-extensions enable syncthing-toggle@projectbluefin.io
 Check status:
 
 ```bash
+gnome-extensions info light-style@projectbluefin.io
 gnome-extensions info power-status-color@projectbluefin.io
 gnome-extensions info syncthing-toggle@projectbluefin.io
 ```
