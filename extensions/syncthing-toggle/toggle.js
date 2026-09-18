@@ -149,7 +149,7 @@ export var ServiceIndicator = GObject.registerClass(
 				this.updateStatus(status == '(running)')
 			} catch (err) {
 				this.updateStatus(false)
-				logError('Err checking status:', err)
+				logError(err, 'Err checking status')
 			}
 		}
 
