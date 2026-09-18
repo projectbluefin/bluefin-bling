@@ -155,6 +155,7 @@ This repository follows standard Project Bluefin practices:
   - [`skill-improvement.md`](docs/skills/skill-improvement.md)
 
 This catalog and [`docs/SKILL.md`](docs/SKILL.md) are both checked against
-`docs/skills/` by `tests/test_docs_inventory.py`: a skill doc that neither routes
-nor appears here fails CI.
+`docs/skills/` by `tests/test_docs_inventory.py`: every skill doc must appear in
+**both** this catalog **and** `docs/SKILL.md`, and missing from either one fails
+CI.
 
