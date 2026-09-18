@@ -381,8 +381,14 @@ class TestSyncthingToggleEnable(unittest.TestCase):
         self.assertEqual(result["notifications"], [])
 
     def test_enable_spawns_nothing_but_systemctl(self):
-        # dakota provisions the syncthing config via /etc/skel; the extension
-        # must not seed folders or run `syncthing generate`.
+        """enable() runs at login and again on every screen unlock.
+
+        Whatever it forks is paid for on the critical path of getting a
+        session onscreen, so the unit-state read — and, on a metered
+        connection, the stop it triggers — is all it may spawn. This is a
+        claim about the login path only; it takes no position on what a
+        deliberate user click is allowed to run.
+        """
         result = run_scenario("enable", unitRunning=True, metered=True)
         self.assertEqual(result["programs"], ["systemctl"])
 
