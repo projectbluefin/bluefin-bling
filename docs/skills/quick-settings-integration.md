@@ -1,16 +1,23 @@
 ---
 name: quick-settings-integration
-version: "1.0"
-last_updated: "2026-09-06"
+version: "1.1"
+last_updated: "2026-09-18"
 id: quick-settings-integration
 one_line_purpose: Integrating indicators, toggles, and notifications into GNOME Quick Settings.
 entry_point: docs/skills/quick-settings-integration.md
+# category: intentionally outside common's ci-ops|test-authoring|meta enum.
+# This is a GNOME-extensions repo; none of the three fit. Tracked upstream.
 category: ui
+mcp_compliance_level: partial
+optimization_status: draft
 status: active
+dependencies: []
 tags: [quicksettings, gnome, notifications, hig, copy]
 description: >-
-  How to build Quick Settings toggles, indicators, and system menu enhancements
-  for Bluefin. Includes GNOME HIG messaging guidelines for user-facing copy.
+  How to build Quick Settings toggles, indicators, and system menu
+  enhancements for Bluefin, including GNOME HIG rules for user-facing copy.
+  Use when touching a QuickMenuToggle, SystemIndicator, or any user-visible
+  notification text.
 metadata:
   type: reference
   context7-sources:
@@ -21,6 +28,12 @@ metadata:
 # Quick Settings & HIG Messaging Integration
 
 Quick Settings is the primary system control surface in GNOME Shell. Bluefin extensions hook into Quick Settings to expose essential OS features (like Sync Folder peer sharing and power state alerts).
+
+## When to Use
+
+- Adding or changing a `QuickMenuToggle`, `SystemIndicator`, or system-menu entry.
+- Writing any user-visible string: notification, toggle title, subtitle, menu label.
+- Deciding how a feature should be surfaced in the Shell UI at all.
 
 ---
 
@@ -91,4 +104,35 @@ const body = isEnabled
     : _('File sharing is paused.');
 
 Main.notify(title, body);
+```
+
+## Red Flags
+
+- **Reaching into Shell internals without a fallback.** Paths like
+  `qs._system._systemItem.menu.sourceActor` are private and move between
+  releases. Guard every hop and degrade quietly rather than throwing during
+  `enable()`.
+- **Leaving a toggle or indicator registered after `disable()`.** Everything
+  pushed to `quickSettingsItems` must be destroyed, and any style class added to
+  a system widget must be removed.
+- **Notifying before the action succeeded.** Telling the user "Sharing Enabled"
+  and then failing validation leaves the message contradicting reality. Notify
+  after the work, or not at all.
+- **Technical voice in user-facing copy.** See the comparison table above; it is
+  the house style, not a suggestion.
+- **Untranslated user-visible strings.** Wrap them in `_()`.
+- **Settings entries not hidden on lock.** `Main.sessionMode.allowSettings`
+  gates visibility; registering the entry is what lets the Shell hide it.
+
+## Verification
+
+```bash
+# Which Quick Settings surfaces does this repo actually touch?
+grep -rn "QuickMenuToggle\|SystemIndicator\|quickSettingsItems" extensions/
+
+# Every user-visible string should be translatable
+grep -rn "Main.notify(" extensions/
+
+# Confirm Shell API shapes against upstream rather than memory
+#   Context7: /git_gitlab_gnome_org/gnome_gnome-shell, /websites/developer_gnome
 ```

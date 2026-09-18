@@ -99,7 +99,10 @@ export var ServiceIndicator = GObject.registerClass(
 		// validate unit-name syntax and pass it as a discrete argv entry.
 		_validatedServiceName() {
 			const name = this._settings.get_string('service-name')
-			if (/^[a-zA-Z0-9_.:@-]+\.service$/.test(name))
+			// Leading character excludes '-' so the value can never be parsed as
+			// a systemctl option (e.g. '--system.service'); matches systemd's
+			// unit-name rules.
+			if (/^[a-zA-Z0-9_][a-zA-Z0-9_.:@-]*\.service$/.test(name))
 				return name
 			console.error(`[SyncthingToggle] Rejecting invalid service-name: ${name}`)
 			return null
@@ -128,12 +131,17 @@ export var ServiceIndicator = GObject.registerClass(
 
 		async checkStatus() {
 			try {
+				const serviceName = this._validatedServiceName()
+				if (!serviceName) {
+					this.updateStatus(false)
+					return
+				}
 				const proc = Gio.Subprocess.new(
 					[
 						'systemctl',
 						'--user',
 						'status',
-						this._settings.get_string('service-name'),
+						serviceName,
 					],
 					Gio.SubprocessFlags.STDOUT_PIPE
 				)
@@ -149,7 +157,7 @@ export var ServiceIndicator = GObject.registerClass(
 				this.updateStatus(status == '(running)')
 			} catch (err) {
 				this.updateStatus(false)
-				logError('Err checking status:', err)
+				logError(err, 'Err checking status')
 			}
 		}
 
