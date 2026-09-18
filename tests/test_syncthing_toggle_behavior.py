@@ -440,6 +440,16 @@ class TestSyncthingToggleDisable(unittest.TestCase):
             ["start"],
             "the scenario disabled before the start even ran",
         )
+        # The window under test is the one *after* a call succeeded. Had the
+        # teardown landed while `start` was still in flight, the cancelled call
+        # would return false and the early return would mask a missing guard,
+        # so this test would pass while covering nothing.
+        self.assertEqual(
+            result["statusInFlightAtDisable"],
+            1,
+            "disable() landed before `start` resolved; this no longer covers "
+            "the success-after-destroy window",
+        )
         self.assertEqual(
             result["notifications"],
             [],

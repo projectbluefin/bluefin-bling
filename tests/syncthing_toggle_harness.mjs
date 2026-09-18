@@ -774,17 +774,25 @@ const scenarios = {
 
         indicator._toggle.checked = true;
         const clicked = indicator._toggle.emit('clicked');
-        // Wait for `start` to have succeeded and the status re-read to be in
-        // flight, then tear the extension down under it.
-        for (let i = 0; i < 50 && log.statusSubprocesses === 0; i++)
+        // Spin until the status re-read has been spawned, which is the
+        // observable proof that `start` already resolved successfully. The
+        // bound is a deadlock guard, not a tick count — but if a future await
+        // pushed the spawn past it, disable() would land while `start` was
+        // still in flight, the cancelled call would return false, and the
+        // early return would mask a missing destroyed check: this scenario
+        // would keep passing while covering nothing. The precondition is
+        // reported so the test fails loudly instead.
+        for (let i = 0; i < 200 && log.statusSubprocesses === 0; i++)
             await Promise.resolve();
         const startedBeforeDisable = log.systemctl.map(argv => argv[2]);
+        const statusInFlightAtDisable = log.statusSubprocesses;
         extension.disable();
         await clicked;
         await settle();
 
         return {
             startedBeforeDisable,
+            statusInFlightAtDisable,
             systemctl: log.systemctl,
             notifications: log.notifications,
             subtitle: indicator._toggle.subtitle,
