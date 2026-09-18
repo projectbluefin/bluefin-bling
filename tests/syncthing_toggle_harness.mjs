@@ -1013,8 +1013,23 @@ const scenarios = {
 
     // disable() lands in the window between a systemctl call that succeeded and
     // the notification it would justify.
+    //
+    // deferStatus names that window instead of racing to it. Spinning
+    // microtasks until the status re-read appears makes the coverage depend on
+    // how many awaits the click path happens to have: at the wrong count the
+    // scenario disables while `start` is still in flight, the cancelled call
+    // returns false, and `!applied` skips the notification for the wrong
+    // reason — so the test passes while covering nothing, including under the
+    // mutation that deletes the guard it exists to defend.
     async 'disable-mid-click'(options) {
-        const {extension, indicator, log} = await buildExtension(options);
+        const {extension, indicator, log} = await buildExtension({
+            ...options,
+            deferStatus: true,
+        });
+        // Let enable()'s own reconcile finish before the window opens.
+        log.releaseStatus('ok');
+        await settle();
+
         log.subprocesses.length = 0;
         log.systemctl.length = 0;
         log.notifications.length = 0;
@@ -1022,17 +1037,27 @@ const scenarios = {
 
         indicator._toggle.checked = true;
         const clicked = indicator._toggle.emit('clicked');
-        // Wait for `start` to have succeeded and the status re-read to be in
-        // flight, then tear the extension down under it.
-        for (let i = 0; i < 50 && log.statusSubprocesses === 0; i++)
-            await Promise.resolve();
+        // settle() cannot overshoot: the status re-read's callback is held, so
+        // the click is parked with `start` already succeeded and the refresh
+        // outstanding, however many awaits precede it.
+        await settle();
         const startedBeforeDisable = log.systemctl.map(argv => argv[2]);
+        // log.systemctl records at spawn, not at exit, so it cannot tell a
+        // start that succeeded from one still in flight. A held status read
+        // can: checkStatus() only runs once `start` has resolved. This is the
+        // window, asserted rather than assumed — settle() is bounded, and an
+        // undershoot would disable while `start` was still running, where the
+        // notification is skipped for the wrong reason.
+        const statusInFlightAtDisable = log.pendingStatus.length;
+
         extension.disable();
+        log.releaseStatus(options.release ?? 'cancelled');
         await clicked;
         await settle();
 
         return {
             startedBeforeDisable,
+            statusInFlightAtDisable,
             systemctl: log.systemctl,
             notifications: log.notifications,
             subtitle: indicator._toggle.subtitle,

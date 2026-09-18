@@ -487,6 +487,13 @@ class TestSyncthingToggleDisable(unittest.TestCase):
             "the scenario disabled before the start even ran",
         )
         self.assertEqual(
+            result["statusInFlightAtDisable"],
+            1,
+            "the scenario never reached the window: disable() landed before "
+            "`start` resolved, so the notification is skipped because the call "
+            "failed, not because the extension is gone",
+        )
+        self.assertEqual(
             result["notifications"],
             [],
             f"a disabled extension still notified: {result['notifications']}",
