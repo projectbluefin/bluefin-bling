@@ -8,13 +8,21 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The `main` ruleset runs a merge queue. The queue builds a temporary
+  # `merge_group` ref and waits for the required `validate extensions` context
+  # to report against it. Without this trigger no run is ever started, the
+  # context never reports, and every queued PR sits in AWAITING_CHECKS until
+  # check_response_timeout_minutes expires and the entry is dropped.
+  merge_group:
   workflow_dispatch:
 
 permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel a merge-queue run: it is the only thing that can satisfy the
+  # required check for that entry, and a cancelled run re-deadlocks the queue.
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 jobs:
   extension-validation:
