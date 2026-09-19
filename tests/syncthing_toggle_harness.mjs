@@ -25,62 +25,39 @@ import {readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {dirname, join} from 'node:path';
 
+import {loadGnomeModule} from './gnome_module_loader.mjs';
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TOGGLE_JS = join(HERE, '..', 'extensions', 'syncthing-toggle', 'toggle.js');
 const EXTENSION_JS = join(HERE, '..', 'extensions', 'syncthing-toggle', 'extension.js');
 
-const IMPORT_LINE_RE =
-    /^\s*import\s+(?:(\*\s+as\s+\w+)|(\{[^}]*\})|(\w+))\s+from\s+['"](?:gi:\/\/|resource:\/\/\/)[^'"]+['"];?\s*$/gm;
+const STUBS = 'globalThis.__stStubs';
 
 function loadToggleModule() {
-    const source = readFileSync(TOGGLE_JS, 'utf8');
-    const matches = [...source.matchAll(IMPORT_LINE_RE)];
-    if (matches.length === 0)
-        throw new Error('no gi:// or resource:/// imports found — harness rewrite is stale');
-
-    const url = asDataModule(rewriteGnomeImports(source));
-    return import(url);
-}
-
-function rewriteGnomeImports(source) {
-    return source.replace(
-        IMPORT_LINE_RE,
-        (_line, namespaceImport, namedImport, defaultImport) => {
-            if (namespaceImport) {
-                const name = namespaceImport.split(/\s+as\s+/)[1];
-                return `const ${name} = globalThis.__stStubs.${name};`;
-            }
-            if (namedImport) {
-                // `{ gettext as _ }` is import syntax; destructuring needs `{ gettext: _ }`.
-                const pattern = namedImport.replace(/\s+as\s+/g, ': ');
-                return `const ${pattern} = globalThis.__stStubs;`;
-            }
-            return `const ${defaultImport} = globalThis.__stStubs.${defaultImport};`;
-        },
-    );
-}
-
-function asDataModule(source) {
-    return `data:text/javascript;base64,${Buffer.from(source, 'utf8').toString('base64')}`;
+    return loadGnomeModule({path: TOGGLE_JS, stubsExpression: STUBS});
 }
 
 // extension.js is the entry point GNOME Shell calls, and the only place the
-// enable()/disable() lifecycle exists. It needs the same rewrite plus one more:
-// its relative `./toggle.js` import cannot resolve from a data: URL, so it is
-// bound to the toggle module this harness already loaded.
-const TOGGLE_IMPORT_RE =
-    /^\s*import\s+(\{[^}]*\})\s+from\s+['"]\.\/toggle\.js['"];?\s*$/gm;
+// enable()/disable() lifecycle exists. It needs the same GNOME rewrite plus one
+// more: its relative `./toggle.js` import cannot resolve from a data: URL, so it
+// is bound to the toggle module this harness already loaded.
+function toggleImportPattern() {
+    return /^\s*import\s+(\{[^}]*\})\s+from\s+['"]\.\/toggle\.js['"];?\s*$/gm;
+}
 
 async function loadExtensionModule() {
     globalThis.__stStubs.__toggle = await loadToggleModule();
-    const source = readFileSync(EXTENSION_JS, 'utf8');
-    if (!TOGGLE_IMPORT_RE.test(source))
+    if (!toggleImportPattern().test(readFileSync(EXTENSION_JS, 'utf8')))
         throw new Error("extension.js no longer imports './toggle.js' — harness rewrite is stale");
-    const rewritten = rewriteGnomeImports(source).replace(
-        TOGGLE_IMPORT_RE,
-        (_line, named) => `const ${named} = globalThis.__stStubs.__toggle;`,
-    );
-    return import(asDataModule(rewritten));
+
+    return loadGnomeModule({
+        path: EXTENSION_JS,
+        stubsExpression: STUBS,
+        rewrite: source => source.replace(
+            toggleImportPattern(),
+            (_line, named) => `const ${named} = globalThis.__stStubs.__toggle;`,
+        ),
+    });
 }
 
 // --- Stubs ------------------------------------------------------------------
