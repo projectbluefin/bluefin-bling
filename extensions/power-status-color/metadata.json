@@ -2,5 +2,14 @@
   "uuid": "power-status-color@projectbluefin.io",
   "name": "Power Status Color",
   "description": "Visually modifies the Quick Settings power button based on pure bootc staged updates and system uptime",
-  "shell-version": ["45", "46", "47", "48", "49", "50"]
+  "shell-version": [
+    "45",
+    "46",
+    "47",
+    "48",
+    "49",
+    "50"
+  ],
+  "url": "https://github.com/projectbluefin/bluefin-bling",
+  "version": 1
 }
