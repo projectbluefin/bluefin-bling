@@ -67,6 +67,11 @@ export default class PowerStatusColorExtension extends Extension {
         this._enabled = true;
         this._cancellable = new Gio.Cancellable();
         this._styledActors = new Map();
+        // Bumped on every enable() so a check still awaiting I/O from a previous
+        // session can detect it is stale once disable()/enable() cycled (screen
+        // lock/unlock) and bail out instead of interleaving style writes with
+        // the new session's check.
+        this._generation = (this._generation ?? 0) + 1;
         this._checkingStatus = false;
         this._statusQueued = false;
 
@@ -103,6 +108,7 @@ export default class PowerStatusColorExtension extends Extension {
 
     disable() {
         this._enabled = false;
+        this._generation = (this._generation ?? 0) + 1;
         this._checkingStatus = false;
         this._statusQueued = false;
 
@@ -171,6 +177,7 @@ export default class PowerStatusColorExtension extends Extension {
             return;
         }
 
+        const generation = this._generation ?? 0;
         this._checkingStatus = true;
         try {
             do {
@@ -181,7 +188,10 @@ export default class PowerStatusColorExtension extends Extension {
                     this._checkRebootPending(),
                 ]);
 
-                if (!this._enabled)
+                // A disable()/enable() cycle during the await invalidates this
+                // run: another check owns the flag now, so drop out without
+                // writing styles or clearing the new run's guard.
+                if (!this._enabled || (this._generation ?? 0) !== generation)
                     return;
 
                 // Priority: Uptime (30+ days / red) overrides reboot (yellow)
@@ -194,7 +204,8 @@ export default class PowerStatusColorExtension extends Extension {
                 }
             } while (this._statusQueued && this._enabled);
         } finally {
-            this._checkingStatus = false;
+            if ((this._generation ?? 0) === generation)
+                this._checkingStatus = false;
         }
     }
 

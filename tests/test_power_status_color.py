@@ -367,6 +367,23 @@ class TestStatusStyling(PowerStatusColorTestCase):
         self.assertFalse(result["checkingStatus"])
         self.assertFalse(result["statusQueued"])
 
+    def test_stale_check_after_reenable_is_retired(self):
+        result = self.run_scenario(
+            "staleRunAfterReenable",
+            uptimeContent=uptime_file(40 * DAY_SECONDS),
+        )
+        self.assertEqual(
+            result["applyCallsAfterStale"],
+            0,
+            "a check retired by disable()/enable() must not write styles",
+        )
+        self.assertTrue(
+            result["checkingStatusAfterStale"],
+            "the stale run must not clear the new run's in-flight guard",
+        )
+        self.assertEqual(result["applyCallsAfterNewRun"], 1)
+        self.assertFalse(result["checkingStatus"])
+
 
 class TestFindPowerButton(PowerStatusColorTestCase):
     def test_direct_system_item_path_is_used(self):

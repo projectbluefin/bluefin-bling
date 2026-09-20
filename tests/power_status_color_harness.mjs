@@ -520,6 +520,56 @@ const scenarios = {
         };
     },
 
+    // A screen lock/unlock (disable() then enable()) while a check is awaiting
+    // its probes must retire that run: it may not write styles beside the new
+    // session's check, and it may not clear the new run's in-flight guard.
+    async staleRunAfterReenable(options) {
+        const {ext} = await buildExtension(options);
+        ext._enabled = true;
+        ext._cancellable = null;
+        ext._generation = 1;
+        ext._styledActors = new Map();
+        ext._checkingStatus = false;
+        ext._statusQueued = false;
+
+        const stale = ext._checkStatus();
+
+        const applied = [];
+        const realApply = ext._applyStyle.bind(ext);
+        ext._applyStyle = className => {
+            applied.push(className);
+            realApply(className);
+        };
+
+        // Hold the new session's probe open so the stale run is observed while
+        // the new run is still in flight.
+        let releaseNewRun;
+        const gate = new Promise(resolve => {
+            releaseNewRun = resolve;
+        });
+        ext._checkUptimeOverdue = () => gate;
+
+        ext.disable();
+        ext.enable(); // starts the new session's check, which now blocks on gate
+
+        await stale;
+        const afterStale = {
+            applyCalls: applied.length,
+            checkingStatus: ext._checkingStatus,
+        };
+
+        releaseNewRun(true);
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const result = {
+            applyCallsAfterStale: afterStale.applyCalls,
+            checkingStatusAfterStale: afterStale.checkingStatus,
+            applyCallsAfterNewRun: applied.length,
+            checkingStatus: ext._checkingStatus,
+        };
+        ext.disable();
+        return result;
+    },
+
     async inFlightGuard(options) {
         const {ext, button} = await buildExtension(options);
         ext._enabled = true;
