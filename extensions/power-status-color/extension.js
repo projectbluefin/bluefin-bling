@@ -66,6 +66,9 @@ export default class PowerStatusColorExtension extends Extension {
     enable() {
         this._enabled = true;
         this._cancellable = new Gio.Cancellable();
+        this._styledActors = new Set();
+        this._checkingStatus = false;
+        this._statusQueued = false;
 
         // 1. Monitor /run directory for reboot-required flags
         try {
@@ -100,6 +103,8 @@ export default class PowerStatusColorExtension extends Extension {
 
     disable() {
         this._enabled = false;
+        this._checkingStatus = false;
+        this._statusQueued = false;
 
         if (this._timeoutId) {
             GLib.Source.remove(this._timeoutId);
@@ -121,6 +126,7 @@ export default class PowerStatusColorExtension extends Extension {
         }
 
         this._removeStyleClasses();
+        this._styledActors = null;
     }
 
     _findPowerButton() {
@@ -160,21 +166,35 @@ export default class PowerStatusColorExtension extends Extension {
         if (!this._enabled)
             return;
 
-        const [isOverdue, isRebootPending] = await Promise.all([
-            this._checkUptimeOverdue(),
-            this._checkRebootPending(),
-        ]);
-
-        if (!this._enabled)
+        if (this._checkingStatus) {
+            this._statusQueued = true;
             return;
+        }
 
-        // Priority: Uptime (30+ days / red) overrides reboot (yellow)
-        if (isOverdue) {
-            this._applyStyle(CLASS_OVERDUE);
-        } else if (isRebootPending) {
-            this._applyStyle(CLASS_REBOOT);
-        } else {
-            this._removeStyleClasses();
+        this._checkingStatus = true;
+        try {
+            do {
+                this._statusQueued = false;
+
+                const [isOverdue, isRebootPending] = await Promise.all([
+                    this._checkUptimeOverdue(),
+                    this._checkRebootPending(),
+                ]);
+
+                if (!this._enabled)
+                    return;
+
+                // Priority: Uptime (30+ days / red) overrides reboot (yellow)
+                if (isOverdue) {
+                    this._applyStyle(CLASS_OVERDUE);
+                } else if (isRebootPending) {
+                    this._applyStyle(CLASS_REBOOT);
+                } else {
+                    this._removeStyleClasses();
+                }
+            } while (this._statusQueued && this._enabled);
+        } finally {
+            this._checkingStatus = false;
         }
     }
 
@@ -224,29 +244,56 @@ export default class PowerStatusColorExtension extends Extension {
         if (!btn)
             return;
 
-        const otherClass = className === CLASS_OVERDUE ? CLASS_REBOOT : CLASS_OVERDUE;
-        btn.remove_style_class_name(otherClass);
-        if (!btn.has_style_class_name(className))
-            btn.add_style_class_name(className);
+        const currentActors = new Set([btn]);
+        if (btn.child)
+            currentActors.add(btn.child);
 
-        if (btn.child?.remove_style_class_name) {
-            btn.child.remove_style_class_name(otherClass);
-            if (!btn.child.has_style_class_name(className))
-                btn.child.add_style_class_name(className);
+        if (!this._styledActors)
+            this._styledActors = new Set();
+
+        for (const actor of this._styledActors) {
+            if (!currentActors.has(actor)) {
+                if (actor.remove_style_class_name) {
+                    actor.remove_style_class_name(CLASS_OVERDUE);
+                    actor.remove_style_class_name(CLASS_REBOOT);
+                }
+            }
         }
+
+        const otherClass = className === CLASS_OVERDUE ? CLASS_REBOOT : CLASS_OVERDUE;
+        for (const actor of currentActors) {
+            if (actor.remove_style_class_name)
+                actor.remove_style_class_name(otherClass);
+            if (actor.add_style_class_name && !actor.has_style_class_name?.(className))
+                actor.add_style_class_name(className);
+        }
+
+        this._styledActors = currentActors;
     }
 
     _removeStyleClasses() {
+        const removed = new Set();
+        if (this._styledActors) {
+            for (const actor of this._styledActors) {
+                if (actor.remove_style_class_name) {
+                    actor.remove_style_class_name(CLASS_OVERDUE);
+                    actor.remove_style_class_name(CLASS_REBOOT);
+                }
+                removed.add(actor);
+            }
+            this._styledActors.clear();
+        }
+
         const btn = this._findPowerButton();
-        if (!btn)
-            return;
-
-        btn.remove_style_class_name(CLASS_OVERDUE);
-        btn.remove_style_class_name(CLASS_REBOOT);
-
-        if (btn.child?.remove_style_class_name) {
-            btn.child.remove_style_class_name(CLASS_OVERDUE);
-            btn.child.remove_style_class_name(CLASS_REBOOT);
+        if (btn) {
+            if (!removed.has(btn) && btn.remove_style_class_name) {
+                btn.remove_style_class_name(CLASS_OVERDUE);
+                btn.remove_style_class_name(CLASS_REBOOT);
+            }
+            if (btn.child && !removed.has(btn.child) && btn.child.remove_style_class_name) {
+                btn.child.remove_style_class_name(CLASS_OVERDUE);
+                btn.child.remove_style_class_name(CLASS_REBOOT);
+            }
         }
     }
 }

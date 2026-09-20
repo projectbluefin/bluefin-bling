@@ -104,8 +104,10 @@ function runCommandAsync(argv, cancellable) {
 3. **Timeouts & File Monitors:**
    - Every `GLib.timeout_add_seconds` must be tracked and removed with `GLib.Source.remove(this._timeoutId)` in `disable()`.
    - Every `Gio.FileMonitor` signal must be disconnected with `monitor.disconnect(id)` and cancelled with `monitor.cancel()`.
-4. **Style Cleanup:**
+4. **Style Cleanup & Foreign Actor Ownership:**
    - Never leave custom CSS style classes on system widgets after deactivation. Clean up all added classes in `disable()`.
+   - **Retain explicit handles on styled foreign actors:** If an extension styles an actor it does not own (such as GNOME Shell's Quick Settings power button), do not rely on live tree lookups (e.g. `_findPowerButton()`) during teardown. Quick Settings widgets are rebuilt across session-mode transitions, and lookups can return `null` or resolve to a different actor when the session locks. Keep an explicit record of styled actors (e.g. a `Set` populated in `_applyStyle()`, including child actors when styled), remove classes directly from that set in `_removeStyleClasses()`, and clear/null the set in `disable()`. If the lookup resolves a new actor while active, remove styles from the orphaned previous actor before styling the new one.
+   - **In-flight guards for asynchronous checks:** When an async status probe (such as polling system uptime or spawning `bootc status`) can be triggered by multiple sources (a file monitor event, a periodic timer, and `enable()`), guard the method with an in-flight flag and a re-check queue (`_checkingStatus` and `_statusQueued`). Concurrent invocations should not interleave or race `Promise.all` resolution; instead, queue a subsequent check to run after the active one completes.
 5. **Dynamic Theme & Style Class Management:**
    - Scope custom theme overrides under a top-level style class on `Main.uiGroup` (e.g. `Main.uiGroup.add_style_class_name('light-style-active')`).
    - Listen to `changed::color-scheme` on `Gio.Settings({ schema_id: 'org.gnome.desktop.interface' })` and notify `St.Settings.get().notify('color-scheme')` after toggling `Main.sessionMode.colorScheme`.

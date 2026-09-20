@@ -303,6 +303,7 @@ const scenarios = {
                 timeoutId: ext._timeoutId,
                 fileMonitor: ext._fileMonitor,
                 cancellable: ext._cancellable,
+                styledActors: ext._styledActors,
                 timeoutsRemoved: log.timeoutsRemoved,
                 monitorCancelled: log.monitorCancelled,
                 monitorDisconnected: log.monitorDisconnected,
@@ -344,6 +345,66 @@ const scenarios = {
         const classes = button.classes();
         ext.disable();
         return {returned, classes};
+    },
+
+    async disableWhenButtonUnresolvable(options) {
+        const {ext, button, stubs} = await buildExtension(options);
+        ext.enable();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const classesAfterEnable = button.classes();
+        const childClassesAfterEnable = button.child ? button.child.classes() : null;
+
+        // Simulate button becoming unresolvable before disable()
+        stubs.Main.panel.statusArea.quickSettings = null;
+
+        ext.disable();
+        return {
+            classesAfterEnable,
+            childClassesAfterEnable,
+            classesAfterDisable: button.classes(),
+            childClassesAfterDisable: button.child ? button.child.classes() : null,
+            styledActorsAfterDisable: ext._styledActors,
+        };
+    },
+
+    async actorReplacedCleansOrphan(options) {
+        const {ext, button, stubs} = await buildExtension(options);
+        ext._enabled = true;
+        ext._cancellable = null;
+        await ext._checkStatus();
+        const firstClasses = button.classes();
+
+        // Simulate Quick Settings rebuilding with a new button actor
+        const newButton = new FakeActor({
+            styleClasses: [],
+            child: new FakeActor({styleClasses: []}),
+        });
+        stubs.Main.panel.statusArea.quickSettings._system._systemItem.menu.sourceActor = newButton;
+
+        await ext._checkStatus();
+        return {
+            firstClasses,
+            firstClassesAfterReplace: button.classes(),
+            firstChildClassesAfterReplace: button.child ? button.child.classes() : null,
+            newClasses: newButton.classes(),
+            newChildClasses: newButton.child.classes(),
+        };
+    },
+
+    async inFlightGuard(options) {
+        const {ext, button} = await buildExtension(options);
+        ext._enabled = true;
+        ext._cancellable = null;
+
+        const first = ext._checkStatus();
+        const second = ext._checkStatus();
+
+        await Promise.all([first, second]);
+        return {
+            classes: button.classes(),
+            checkingStatus: ext._checkingStatus,
+            statusQueued: ext._statusQueued,
+        };
     },
 };
 

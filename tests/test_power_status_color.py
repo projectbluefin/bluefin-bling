@@ -304,6 +304,27 @@ class TestStatusStyling(PowerStatusColorTestCase):
             "the post-await guard must drop a result that arrives after disable()",
         )
 
+    def test_rebuilt_power_button_cleans_orphaned_previous_actor(self):
+        result = self.run_scenario(
+            "actorReplacedCleansOrphan",
+            uptimeContent=uptime_file(40 * DAY_SECONDS),
+            withChild=True,
+        )
+        self.assertEqual(result["firstClasses"], [CLASS_OVERDUE])
+        self.assertEqual(result["firstClassesAfterReplace"], [])
+        self.assertEqual(result["firstChildClassesAfterReplace"], [])
+        self.assertEqual(result["newClasses"], [CLASS_OVERDUE])
+        self.assertEqual(result["newChildClasses"], [CLASS_OVERDUE])
+
+    def test_concurrent_check_status_calls_are_guarded(self):
+        result = self.run_scenario(
+            "inFlightGuard",
+            uptimeContent=uptime_file(40 * DAY_SECONDS),
+        )
+        self.assertEqual(result["classes"], [CLASS_OVERDUE])
+        self.assertFalse(result["checkingStatus"])
+        self.assertFalse(result["statusQueued"])
+
 
 class TestFindPowerButton(PowerStatusColorTestCase):
     def test_direct_system_item_path_is_used(self):
@@ -373,6 +394,7 @@ class TestLifecycle(PowerStatusColorTestCase):
         self.assertIsNone(after["timeoutId"])
         self.assertIsNone(after["fileMonitor"])
         self.assertIsNone(after["cancellable"])
+        self.assertIsNone(after["styledActors"])
         self.assertEqual(after["timeoutsRemoved"], [42])
         self.assertTrue(after["monitorDisconnected"])
         self.assertTrue(after["monitorCancelled"])
@@ -383,6 +405,18 @@ class TestLifecycle(PowerStatusColorTestCase):
         result = self.run_scenario("lifecycle", uptimeContent=uptime_file(60 * DAY_SECONDS))
         self.assertEqual(result["afterEnable"]["classes"], [CLASS_OVERDUE])
         self.assertEqual(result["afterDisable"]["classes"], [])
+
+    def test_disable_clears_styled_actors_even_when_power_button_unresolvable(self):
+        result = self.run_scenario(
+            "disableWhenButtonUnresolvable",
+            uptimeContent=uptime_file(60 * DAY_SECONDS),
+            withChild=True,
+        )
+        self.assertEqual(result["classesAfterEnable"], [CLASS_OVERDUE])
+        self.assertEqual(result["childClassesAfterEnable"], [CLASS_OVERDUE])
+        self.assertEqual(result["classesAfterDisable"], [])
+        self.assertEqual(result["childClassesAfterDisable"], [])
+        self.assertIsNone(result["styledActorsAfterDisable"])
 
     def test_a_post_disable_monitor_event_cannot_fire(self):
         result = self.run_scenario("lifecycle", uptimeContent=uptime_file(60 * DAY_SECONDS))
