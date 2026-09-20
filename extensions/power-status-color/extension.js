@@ -66,7 +66,7 @@ export default class PowerStatusColorExtension extends Extension {
     enable() {
         this._enabled = true;
         this._cancellable = new Gio.Cancellable();
-        this._styledActors = new Set();
+        this._styledActors = new Map();
         this._checkingStatus = false;
         this._statusQueued = false;
 
@@ -239,6 +239,55 @@ export default class PowerStatusColorExtension extends Extension {
         return false;
     }
 
+    // Shell owns the Quick Settings actors and can destroy them at any time
+    // (Quick Settings rebuilds, screen lock). Retained references therefore have
+    // to be evicted on 'destroy' and every style mutation has to tolerate an
+    // already-disposed actor instead of throwing out of enable()/disable().
+    _trackActor(actor) {
+        if (!this._styledActors)
+            this._styledActors = new Map();
+
+        if (this._styledActors.has(actor))
+            return;
+
+        let destroyId = 0;
+        if (typeof actor.connect === 'function') {
+            try {
+                destroyId = actor.connect('destroy', () => this._forgetActor(actor, true));
+            } catch {
+                destroyId = 0;
+            }
+        }
+        this._styledActors.set(actor, destroyId);
+    }
+
+    _forgetActor(actor, destroyed = false) {
+        if (!this._styledActors)
+            return;
+
+        const destroyId = this._styledActors.get(actor);
+        this._styledActors.delete(actor);
+
+        if (!destroyed && destroyId && typeof actor.disconnect === 'function') {
+            try {
+                actor.disconnect(destroyId);
+            } catch {
+                // Actor already disposed; handler died with it
+            }
+        }
+    }
+
+    _clearActorStyle(actor) {
+        try {
+            if (actor.remove_style_class_name) {
+                actor.remove_style_class_name(CLASS_OVERDUE);
+                actor.remove_style_class_name(CLASS_REBOOT);
+            }
+        } catch {
+            // Actor was destroyed by Shell before we could unstyle it
+        }
+    }
+
     _applyStyle(className) {
         const btn = this._findPowerButton();
         if (!btn)
@@ -249,51 +298,47 @@ export default class PowerStatusColorExtension extends Extension {
             currentActors.add(btn.child);
 
         if (!this._styledActors)
-            this._styledActors = new Set();
+            this._styledActors = new Map();
 
-        for (const actor of this._styledActors) {
+        for (const actor of [...this._styledActors.keys()]) {
             if (!currentActors.has(actor)) {
-                if (actor.remove_style_class_name) {
-                    actor.remove_style_class_name(CLASS_OVERDUE);
-                    actor.remove_style_class_name(CLASS_REBOOT);
-                }
+                this._clearActorStyle(actor);
+                this._forgetActor(actor);
             }
         }
 
         const otherClass = className === CLASS_OVERDUE ? CLASS_REBOOT : CLASS_OVERDUE;
         for (const actor of currentActors) {
-            if (actor.remove_style_class_name)
-                actor.remove_style_class_name(otherClass);
-            if (actor.add_style_class_name && !actor.has_style_class_name?.(className))
-                actor.add_style_class_name(className);
+            try {
+                if (actor.remove_style_class_name)
+                    actor.remove_style_class_name(otherClass);
+                if (actor.add_style_class_name && !actor.has_style_class_name?.(className))
+                    actor.add_style_class_name(className);
+            } catch {
+                // Destroyed mid-update; drop it instead of retaining a dead ref
+                this._forgetActor(actor);
+                continue;
+            }
+            this._trackActor(actor);
         }
-
-        this._styledActors = currentActors;
     }
 
     _removeStyleClasses() {
         const removed = new Set();
         if (this._styledActors) {
-            for (const actor of this._styledActors) {
-                if (actor.remove_style_class_name) {
-                    actor.remove_style_class_name(CLASS_OVERDUE);
-                    actor.remove_style_class_name(CLASS_REBOOT);
-                }
+            for (const actor of [...this._styledActors.keys()]) {
+                this._clearActorStyle(actor);
+                this._forgetActor(actor);
                 removed.add(actor);
             }
-            this._styledActors.clear();
         }
 
         const btn = this._findPowerButton();
         if (btn) {
-            if (!removed.has(btn) && btn.remove_style_class_name) {
-                btn.remove_style_class_name(CLASS_OVERDUE);
-                btn.remove_style_class_name(CLASS_REBOOT);
-            }
-            if (btn.child && !removed.has(btn.child) && btn.child.remove_style_class_name) {
-                btn.child.remove_style_class_name(CLASS_OVERDUE);
-                btn.child.remove_style_class_name(CLASS_REBOOT);
-            }
+            if (!removed.has(btn))
+                this._clearActorStyle(btn);
+            if (btn.child && !removed.has(btn.child))
+                this._clearActorStyle(btn.child);
         }
     }
 }

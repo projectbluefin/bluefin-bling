@@ -316,6 +316,48 @@ class TestStatusStyling(PowerStatusColorTestCase):
         self.assertEqual(result["newClasses"], [CLASS_OVERDUE])
         self.assertEqual(result["newChildClasses"], [CLASS_OVERDUE])
 
+    def test_destroyed_actor_is_evicted_and_restyle_still_succeeds(self):
+        result = self.run_scenario(
+            "destroyedActorEvictedOnRebuild",
+            uptimeContent=uptime_file(40 * DAY_SECONDS),
+            withChild=True,
+        )
+        self.assertEqual(result["trackedAfterFirstCheck"], 2)
+        self.assertEqual(result["destroySignalsConnected"], ["destroy"])
+        self.assertEqual(
+            result["trackedAfterDestroy"],
+            1,
+            "the destroyed actor must be dropped from the retained set",
+        )
+        self.assertFalse(result["threw"])
+        self.assertEqual(result["newClasses"], [CLASS_OVERDUE])
+        self.assertEqual(result["trackedAfterRecheck"], 1)
+
+    def test_silently_disposed_actor_does_not_block_restyle(self):
+        result = self.run_scenario(
+            "silentlyDisposedActorDoesNotBreakRestyle",
+            uptimeContent=uptime_file(40 * DAY_SECONDS),
+            withChild=True,
+        )
+        self.assertFalse(
+            result["threw"],
+            "a disposed retained actor must not abort styling the new actor",
+        )
+        self.assertEqual(result["newClasses"], [CLASS_OVERDUE])
+        self.assertEqual(result["trackedAfterRecheck"], 1)
+
+    def test_disable_survives_a_silently_disposed_styled_actor(self):
+        result = self.run_scenario(
+            "disableWithSilentlyDisposedActor",
+            uptimeContent=uptime_file(40 * DAY_SECONDS),
+            withChild=True,
+        )
+        self.assertEqual(result["trackedAfterEnable"], 2)
+        self.assertFalse(result["threw"], "disable() must not propagate a disposed-actor error")
+        self.assertFalse(result["enabled"])
+        self.assertIsNone(result["styledActorsAfterDisable"])
+        self.assertTrue(result["cancellableCancelled"])
+
     def test_concurrent_check_status_calls_are_guarded(self):
         result = self.run_scenario(
             "inFlightGuard",
