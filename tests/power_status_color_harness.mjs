@@ -9,35 +9,19 @@
 // Usage: node power_status_color_harness.mjs <scenario> ['<json options>']
 // Prints a single JSON object describing the observed result.
 
-import {readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {dirname, join} from 'node:path';
+
+import {loadGnomeModule} from './gnome_module_loader.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const EXTENSION_JS = join(HERE, '..', 'extensions', 'power-status-color', 'extension.js');
 
-const IMPORT_LINE_RE = /^\s*import\s+(?:(\*\s+as\s+\w+)|(\{[^}]*\})|(\w+))\s+from\s+['"](?:gi:\/\/|resource:\/\/\/)[^'"]+['"];?\s*$/gm;
-
 function loadExtensionModule() {
-    const source = readFileSync(EXTENSION_JS, 'utf8');
-    const matches = [...source.matchAll(IMPORT_LINE_RE)];
-    if (matches.length === 0)
-        throw new Error('no gi:// or resource:/// imports found — harness rewrite is stale');
-
-    const rewritten = source.replace(
-        IMPORT_LINE_RE,
-        (_line, namespaceImport, namedImport, defaultImport) => {
-            if (namespaceImport) {
-                const name = namespaceImport.split(/\s+as\s+/)[1];
-                return `const ${name} = globalThis.__pscStubs.${name};`;
-            }
-            if (namedImport)
-                return `const ${namedImport} = globalThis.__pscStubs;`;
-            return `const ${defaultImport} = globalThis.__pscStubs.${defaultImport};`;
-        },
-    );
-    const url = `data:text/javascript;base64,${Buffer.from(rewritten, 'utf8').toString('base64')}`;
-    return import(url);
+    return loadGnomeModule({
+        path: EXTENSION_JS,
+        stubsExpression: 'globalThis.__pscStubs',
+    });
 }
 
 // --- Stubs ------------------------------------------------------------------
