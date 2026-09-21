@@ -425,9 +425,11 @@ export var ServiceIndicator = GObject.registerClass(
 			// Before `syncthing generate` runs, not after: the next statement
 			// drops key.pem (the device TLS private key) and config.xml, whose
 			// <apikey> is full control of the local REST API, into this
-			// directory. Unconditional rather than only on the path that just
-			// created it, so a directory an earlier build of this extension
-			// left at 0755 is narrowed on the next seed.
+			// directory. Not tied to the create path above, so a state dir
+			// that exists but holds no config.xml — a half-finished or
+			// cleared-out seed — is narrowed too. An install that already has
+			// a config.xml returned above and keeps whatever mode it has;
+			// widening there is #69's remaining tail, not this change.
 			//
 			// A filesystem with no unix modes — or a state dir that turned out
 			// to be a symlink — refuses this. Log it and seed anyway: the
