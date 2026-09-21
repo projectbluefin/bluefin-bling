@@ -215,6 +215,7 @@ const IO_ERROR_ENUM = {
     NOT_FOUND: 'g-io-error-not-found',
     EXISTS: 'g-io-error-exists',
     CANCELLED: 'g-io-error-cancelled',
+    NOT_SUPPORTED: 'g-io-error-not-supported',
 };
 
 class FakeGioError extends Error {
@@ -228,12 +229,37 @@ class FakeGioError extends Error {
     }
 }
 
+// Gio.FileInfo, reduced to the one attribute toggle.js sets. Real GFileInfo is
+// a bag of typed attributes; a Map keyed by attribute name is the whole of it
+// that matters here.
+class FakeFileInfo {
+    constructor() {
+        this.attributes = new Map();
+    }
+
+    set_attribute_uint32(attribute, value) {
+        this.attributes.set(attribute, value);
+    }
+
+    get_attribute_uint32(attribute) {
+        return this.attributes.get(attribute);
+    }
+}
+
 class FakeFileSystem {
     constructor() {
         this.dirs = new Set(['/']);
         this.files = new Map();
         this.created = [];
         this.writes = [];
+        // Modes the code under test asked for, keyed by path. A plain object,
+        // not a Map: scenarios hand these straight to JSON.stringify.
+        this.modes = {};
+        // Every set_attributes_async call, in order, with the flags it used —
+        // NOFOLLOW_SYMLINKS is part of what the mode change has to get right.
+        this.attributeCalls = [];
+        // Stand-in for a filesystem with no unix modes (or a symlinked target).
+        this.setAttributesFails = false;
     }
 
     addDir(path) {
@@ -297,6 +323,24 @@ class FakeFile {
         return true;
     }
 
+    set_attributes_async(info, flags, _priority, _cancellable, callback) {
+        queueMicrotask(() => callback(this, {info, flags}));
+    }
+
+    set_attributes_finish(res) {
+        if (this._fs.setAttributesFails) {
+            throw new FakeGioError(
+                IO_ERROR_ENUM.NOT_SUPPORTED,
+                `Setting attributes not supported: ${this.path}`,
+            );
+        }
+        const mode = res.info.get_attribute_uint32('unix::mode');
+        if (mode !== undefined)
+            this._fs.modes[this.path] = mode;
+        this._fs.attributeCalls.push({path: this.path, flags: res.flags, mode});
+        return [true, res.info];
+    }
+
     load_contents_async(_cancellable, callback) {
         queueMicrotask(() => callback(this, {}));
     }
@@ -354,6 +398,9 @@ function makeStubs(options) {
         // `syncthing generate` is kept out of log.systemctl so the verb
         // assertions stay about systemctl.
         generate: [],
+        // One entry per `syncthing generate`: the recorded directory modes at
+        // the instant that child was spawned.
+        modesAtGenerate: [],
         // Callbacks held back by options.deferStatus / deferGenerate /
         // deferSystemctl, so a scenario can land disable() inside one specific
         // await window and then release it.
@@ -388,6 +435,7 @@ function makeStubs(options) {
     const configPath = `${stateDir}/config.xml`;
 
     const fs = new FakeFileSystem();
+    fs.setAttributesFails = options.setAttributesFails ?? false;
     fs.addDir(homeDir);
     if (options.syncDirExists ?? true)
         fs.addDir(`${homeDir}/Sync`);
@@ -465,9 +513,14 @@ function makeStubs(options) {
         }
 
         const isGenerate = argv[0] !== 'systemctl';
-        if (isGenerate)
+        if (isGenerate) {
             log.generate.push(argv);
-        else
+            // The directory modes as they stood the moment the child was
+            // spawned. `syncthing generate` writes key.pem and the REST apikey
+            // from here on, so anything tightened afterwards is tightened too
+            // late — this snapshot is what pins the ordering.
+            log.modesAtGenerate.push({...fs.modes});
+        } else
             log.systemctl.push(argv);
 
         return Object.assign(proc, {
@@ -574,6 +627,7 @@ function makeStubs(options) {
         Cancellable: FakeCancellable,
         FileCreateFlags: {NONE: 0, PRIVATE: 1, REPLACE_DESTINATION: 2},
         FileQueryInfoFlags: {NONE: 0, NOFOLLOW_SYMLINKS: 1},
+        FileInfo: FakeFileInfo,
         IOErrorEnum: IO_ERROR_ENUM,
         File: {
             new_for_path(path) {
@@ -1184,6 +1238,9 @@ const scenarios = {
             paths,
             createdDirs: log.fs.created,
             generate: log.generate,
+            modes: log.fs.modes,
+            modesAtGenerate: log.modesAtGenerate,
+            attributeCalls: log.fs.attributeCalls,
             writes: log.fs.writes,
             errors: log.errors,
         };
