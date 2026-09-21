@@ -66,6 +66,14 @@ export default class PowerStatusColorExtension extends Extension {
     enable() {
         this._enabled = true;
         this._cancellable = new Gio.Cancellable();
+        this._styledActors = new Map();
+        // Bumped on every enable() so a check still awaiting I/O from a previous
+        // session can detect it is stale once disable()/enable() cycled (screen
+        // lock/unlock) and bail out instead of interleaving style writes with
+        // the new session's check.
+        this._generation = (this._generation ?? 0) + 1;
+        this._checkingStatus = false;
+        this._statusQueued = false;
 
         // 1. Monitor /run directory for reboot-required flags
         try {
@@ -100,6 +108,9 @@ export default class PowerStatusColorExtension extends Extension {
 
     disable() {
         this._enabled = false;
+        this._generation = (this._generation ?? 0) + 1;
+        this._checkingStatus = false;
+        this._statusQueued = false;
 
         if (this._timeoutId) {
             GLib.Source.remove(this._timeoutId);
@@ -121,6 +132,7 @@ export default class PowerStatusColorExtension extends Extension {
         }
 
         this._removeStyleClasses();
+        this._styledActors = null;
     }
 
     _findPowerButton() {
@@ -160,21 +172,40 @@ export default class PowerStatusColorExtension extends Extension {
         if (!this._enabled)
             return;
 
-        const [isOverdue, isRebootPending] = await Promise.all([
-            this._checkUptimeOverdue(),
-            this._checkRebootPending(),
-        ]);
-
-        if (!this._enabled)
+        if (this._checkingStatus) {
+            this._statusQueued = true;
             return;
+        }
 
-        // Priority: Uptime (30+ days / red) overrides reboot (yellow)
-        if (isOverdue) {
-            this._applyStyle(CLASS_OVERDUE);
-        } else if (isRebootPending) {
-            this._applyStyle(CLASS_REBOOT);
-        } else {
-            this._removeStyleClasses();
+        const generation = this._generation ?? 0;
+        this._checkingStatus = true;
+        try {
+            do {
+                this._statusQueued = false;
+
+                const [isOverdue, isRebootPending] = await Promise.all([
+                    this._checkUptimeOverdue(),
+                    this._checkRebootPending(),
+                ]);
+
+                // A disable()/enable() cycle during the await invalidates this
+                // run: another check owns the flag now, so drop out without
+                // writing styles or clearing the new run's guard.
+                if (!this._enabled || (this._generation ?? 0) !== generation)
+                    return;
+
+                // Priority: Uptime (30+ days / red) overrides reboot (yellow)
+                if (isOverdue) {
+                    this._applyStyle(CLASS_OVERDUE);
+                } else if (isRebootPending) {
+                    this._applyStyle(CLASS_REBOOT);
+                } else {
+                    this._removeStyleClasses();
+                }
+            } while (this._statusQueued && this._enabled);
+        } finally {
+            if ((this._generation ?? 0) === generation)
+                this._checkingStatus = false;
         }
     }
 
@@ -219,34 +250,106 @@ export default class PowerStatusColorExtension extends Extension {
         return false;
     }
 
+    // Shell owns the Quick Settings actors and can destroy them at any time
+    // (Quick Settings rebuilds, screen lock). Retained references therefore have
+    // to be evicted on 'destroy' and every style mutation has to tolerate an
+    // already-disposed actor instead of throwing out of enable()/disable().
+    _trackActor(actor) {
+        if (!this._styledActors)
+            this._styledActors = new Map();
+
+        if (this._styledActors.has(actor))
+            return;
+
+        let destroyId = 0;
+        if (typeof actor.connect === 'function') {
+            try {
+                destroyId = actor.connect('destroy', () => this._forgetActor(actor, true));
+            } catch {
+                destroyId = 0;
+            }
+        }
+        this._styledActors.set(actor, destroyId);
+    }
+
+    _forgetActor(actor, destroyed = false) {
+        if (!this._styledActors)
+            return;
+
+        const destroyId = this._styledActors.get(actor);
+        this._styledActors.delete(actor);
+
+        if (!destroyed && destroyId && typeof actor.disconnect === 'function') {
+            try {
+                actor.disconnect(destroyId);
+            } catch {
+                // Actor already disposed; handler died with it
+            }
+        }
+    }
+
+    _clearActorStyle(actor) {
+        try {
+            if (actor.remove_style_class_name) {
+                actor.remove_style_class_name(CLASS_OVERDUE);
+                actor.remove_style_class_name(CLASS_REBOOT);
+            }
+        } catch {
+            // Actor was destroyed by Shell before we could unstyle it
+        }
+    }
+
     _applyStyle(className) {
         const btn = this._findPowerButton();
         if (!btn)
             return;
 
-        const otherClass = className === CLASS_OVERDUE ? CLASS_REBOOT : CLASS_OVERDUE;
-        btn.remove_style_class_name(otherClass);
-        if (!btn.has_style_class_name(className))
-            btn.add_style_class_name(className);
+        const currentActors = new Set([btn]);
+        if (btn.child)
+            currentActors.add(btn.child);
 
-        if (btn.child?.remove_style_class_name) {
-            btn.child.remove_style_class_name(otherClass);
-            if (!btn.child.has_style_class_name(className))
-                btn.child.add_style_class_name(className);
+        if (!this._styledActors)
+            this._styledActors = new Map();
+
+        for (const actor of [...this._styledActors.keys()]) {
+            if (!currentActors.has(actor)) {
+                this._clearActorStyle(actor);
+                this._forgetActor(actor);
+            }
+        }
+
+        const otherClass = className === CLASS_OVERDUE ? CLASS_REBOOT : CLASS_OVERDUE;
+        for (const actor of currentActors) {
+            try {
+                if (actor.remove_style_class_name)
+                    actor.remove_style_class_name(otherClass);
+                if (actor.add_style_class_name && !actor.has_style_class_name?.(className))
+                    actor.add_style_class_name(className);
+            } catch {
+                // Destroyed mid-update; drop it instead of retaining a dead ref
+                this._forgetActor(actor);
+                continue;
+            }
+            this._trackActor(actor);
         }
     }
 
     _removeStyleClasses() {
+        const removed = new Set();
+        if (this._styledActors) {
+            for (const actor of [...this._styledActors.keys()]) {
+                this._clearActorStyle(actor);
+                this._forgetActor(actor);
+                removed.add(actor);
+            }
+        }
+
         const btn = this._findPowerButton();
-        if (!btn)
-            return;
-
-        btn.remove_style_class_name(CLASS_OVERDUE);
-        btn.remove_style_class_name(CLASS_REBOOT);
-
-        if (btn.child?.remove_style_class_name) {
-            btn.child.remove_style_class_name(CLASS_OVERDUE);
-            btn.child.remove_style_class_name(CLASS_REBOOT);
+        if (btn) {
+            if (!removed.has(btn))
+                this._clearActorStyle(btn);
+            if (btn.child && !removed.has(btn.child))
+                this._clearActorStyle(btn.child);
         }
     }
 }

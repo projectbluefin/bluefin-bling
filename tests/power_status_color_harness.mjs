@@ -33,18 +33,63 @@ class FakeActor {
         this.accessible_name = accessibleName;
         this._children = children;
         this.child = child;
+        this._destroyed = false;
+        this._handlers = new Map();
+        this._nextHandlerId = 0;
+    }
+
+    // Mirrors GJS: touching a Shell-destroyed actor throws instead of silently
+    // working, which is what the retained-reference guards have to survive.
+    _assertAlive() {
+        if (this._destroyed)
+            throw new Error('Object St.Widget has been already deallocated');
     }
 
     has_style_class_name(name) {
+        this._assertAlive();
         return this._styleClasses.has(name);
     }
 
     add_style_class_name(name) {
+        this._assertAlive();
         this._styleClasses.add(name);
     }
 
     remove_style_class_name(name) {
+        this._assertAlive();
         this._styleClasses.delete(name);
+    }
+
+    connect(signal, callback) {
+        this._assertAlive();
+        const id = ++this._nextHandlerId;
+        this._handlers.set(id, {signal, callback});
+        return id;
+    }
+
+    disconnect(id) {
+        this._assertAlive();
+        this._handlers.delete(id);
+    }
+
+    connectedSignals() {
+        return [...this._handlers.values()].map(h => h.signal);
+    }
+
+    // Shell destroying the actor: emit 'destroy', then behave as deallocated.
+    destroy() {
+        const handlers = [...this._handlers.values()].filter(h => h.signal === 'destroy');
+        this._handlers.clear();
+        this._destroyed = true;
+        for (const {callback} of handlers)
+            callback(this);
+    }
+
+    // Disposal without a 'destroy' emission reaching us (e.g. the actor was
+    // never connectable), so only the try/catch guards can save the caller.
+    disposeSilently() {
+        this._handlers.clear();
+        this._destroyed = true;
     }
 
     get_children() {
@@ -287,6 +332,7 @@ const scenarios = {
                 timeoutId: ext._timeoutId,
                 fileMonitor: ext._fileMonitor,
                 cancellable: ext._cancellable,
+                styledActors: ext._styledActors,
                 timeoutsRemoved: log.timeoutsRemoved,
                 monitorCancelled: log.monitorCancelled,
                 monitorDisconnected: log.monitorDisconnected,
@@ -328,6 +374,200 @@ const scenarios = {
         const classes = button.classes();
         ext.disable();
         return {returned, classes};
+    },
+
+    async disableWhenButtonUnresolvable(options) {
+        const {ext, button, stubs} = await buildExtension(options);
+        ext.enable();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const classesAfterEnable = button.classes();
+        const childClassesAfterEnable = button.child ? button.child.classes() : null;
+
+        // Simulate button becoming unresolvable before disable()
+        stubs.Main.panel.statusArea.quickSettings = null;
+
+        ext.disable();
+        return {
+            classesAfterEnable,
+            childClassesAfterEnable,
+            classesAfterDisable: button.classes(),
+            childClassesAfterDisable: button.child ? button.child.classes() : null,
+            styledActorsAfterDisable: ext._styledActors,
+        };
+    },
+
+    async actorReplacedCleansOrphan(options) {
+        const {ext, button, stubs} = await buildExtension(options);
+        ext._enabled = true;
+        ext._cancellable = null;
+        await ext._checkStatus();
+        const firstClasses = button.classes();
+
+        // Simulate Quick Settings rebuilding with a new button actor
+        const newButton = new FakeActor({
+            styleClasses: [],
+            child: new FakeActor({styleClasses: []}),
+        });
+        stubs.Main.panel.statusArea.quickSettings._system._systemItem.menu.sourceActor = newButton;
+
+        await ext._checkStatus();
+        return {
+            firstClasses,
+            firstClassesAfterReplace: button.classes(),
+            firstChildClassesAfterReplace: button.child ? button.child.classes() : null,
+            newClasses: newButton.classes(),
+            newChildClasses: newButton.child.classes(),
+        };
+    },
+
+    // Shell destroys the styled actor (emitting 'destroy') and then rebuilds
+    // Quick Settings. The retained reference must have been evicted and the
+    // recheck must still style the new actor.
+    async destroyedActorEvictedOnRebuild(options) {
+        const {ext, button, stubs} = await buildExtension(options);
+        ext._enabled = true;
+        ext._cancellable = null;
+        await ext._checkStatus();
+        const trackedAfterFirstCheck = ext._styledActors.size;
+        const destroySignalsConnected = button.connectedSignals();
+
+        button.destroy();
+        const trackedAfterDestroy = ext._styledActors.size;
+
+        const newButton = new FakeActor({styleClasses: []});
+        stubs.Main.panel.statusArea.quickSettings._system._systemItem.menu.sourceActor = newButton;
+
+        let threw = false;
+        try {
+            await ext._checkStatus();
+        } catch {
+            threw = true;
+        }
+
+        return {
+            trackedAfterFirstCheck,
+            destroySignalsConnected,
+            trackedAfterDestroy,
+            threw,
+            newClasses: newButton.classes(),
+            trackedAfterRecheck: ext._styledActors.size,
+        };
+    },
+
+    // Same rebuild, but the actor was disposed without us seeing 'destroy'.
+    // _applyStyle has to survive the throwing retained reference.
+    async silentlyDisposedActorDoesNotBreakRestyle(options) {
+        const {ext, button, stubs} = await buildExtension(options);
+        ext._enabled = true;
+        ext._cancellable = null;
+        await ext._checkStatus();
+
+        button.disposeSilently();
+
+        const newButton = new FakeActor({styleClasses: []});
+        stubs.Main.panel.statusArea.quickSettings._system._systemItem.menu.sourceActor = newButton;
+
+        let threw = false;
+        try {
+            await ext._checkStatus();
+        } catch {
+            threw = true;
+        }
+
+        return {threw, newClasses: newButton.classes(), trackedAfterRecheck: ext._styledActors.size};
+    },
+
+    // disable() must complete (and null out the retained set) even when the
+    // styled actor throws on every style mutation.
+    async disableWithSilentlyDisposedActor(options) {
+        const {ext, button, stubs} = await buildExtension(options);
+        ext.enable();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const trackedAfterEnable = ext._styledActors.size;
+
+        button.disposeSilently();
+        stubs.Main.panel.statusArea.quickSettings = null;
+
+        let threw = false;
+        try {
+            ext.disable();
+        } catch {
+            threw = true;
+        }
+
+        return {
+            trackedAfterEnable,
+            threw,
+            enabled: ext._enabled,
+            styledActorsAfterDisable: ext._styledActors,
+            cancellableCancelled: ext._cancellable === null,
+        };
+    },
+
+    // A screen lock/unlock (disable() then enable()) while a check is awaiting
+    // its probes must retire that run: it may not write styles beside the new
+    // session's check, and it may not clear the new run's in-flight guard.
+    async staleRunAfterReenable(options) {
+        const {ext} = await buildExtension(options);
+        ext._enabled = true;
+        ext._cancellable = null;
+        ext._generation = 1;
+        ext._styledActors = new Map();
+        ext._checkingStatus = false;
+        ext._statusQueued = false;
+
+        const stale = ext._checkStatus();
+
+        const applied = [];
+        const realApply = ext._applyStyle.bind(ext);
+        ext._applyStyle = className => {
+            applied.push(className);
+            realApply(className);
+        };
+
+        // Hold the new session's probe open so the stale run is observed while
+        // the new run is still in flight.
+        let releaseNewRun;
+        const gate = new Promise(resolve => {
+            releaseNewRun = resolve;
+        });
+        ext._checkUptimeOverdue = () => gate;
+
+        ext.disable();
+        ext.enable(); // starts the new session's check, which now blocks on gate
+
+        await stale;
+        const afterStale = {
+            applyCalls: applied.length,
+            checkingStatus: ext._checkingStatus,
+        };
+
+        releaseNewRun(true);
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const result = {
+            applyCallsAfterStale: afterStale.applyCalls,
+            checkingStatusAfterStale: afterStale.checkingStatus,
+            applyCallsAfterNewRun: applied.length,
+            checkingStatus: ext._checkingStatus,
+        };
+        ext.disable();
+        return result;
+    },
+
+    async inFlightGuard(options) {
+        const {ext, button} = await buildExtension(options);
+        ext._enabled = true;
+        ext._cancellable = null;
+
+        const first = ext._checkStatus();
+        const second = ext._checkStatus();
+
+        await Promise.all([first, second]);
+        return {
+            classes: button.classes(),
+            checkingStatus: ext._checkingStatus,
+            statusQueued: ext._statusQueued,
+        };
     },
 };
 
