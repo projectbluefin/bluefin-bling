@@ -31,19 +31,20 @@ metadata:
 
 ## What `main` actually requires
 
-One active ruleset governs `main` (`main — review policy`, 22705148); a second
-(`main — merge queue`, 23208287) is currently disabled. Derive them rather than
-trusting this list — see [Verification](#verification).
+Two active rulesets govern `main`: `main — review policy` (22705148) and
+`main — merge queue` (23208287). Derive them rather than trusting this list —
+see [Verification](#verification).
 
 | Requirement | Value |
 |---|---|
-| Approving reviews | **2** |
+| Approving reviews | **1** |
 | Required status check | `validate extensions (tests, node --check, glib-compile-schemas)` |
 | Dismiss stale reviews on push | yes |
-| Require approval of most recent push | yes |
+| Require approval of most recent push | no |
+| Require extra approval for unattributed changes | yes |
 | Merge method | **squash** |
 | Direct push to `main` | **rejected, no exceptions** |
-| Merge queue | **disabled 2026-09-18** — see below |
+| Merge queue | **active** (ruleset 23208287, squash merge) |
 
 There is no doc-only fast path. `AGENTS.md` and `docs/SKILL.md` both claimed one
 until 2026-09-18; the ruleset rejects every direct push:
@@ -54,23 +55,16 @@ remote: - Required status check "validate extensions (...)" is expected.
 remote: - Changes must be made through a pull request.
 ```
 
-### Why the merge queue is currently off
+### Merge queue configuration
 
-Ruleset `main — merge queue` (23208287) was set to `enforcement: disabled` on
-2026-09-18. It had deadlocked the repository: it required a `merge_group` check
-that `ci.yml` could never produce, and **both rulesets have `bypass_actors: []`**,
-so not even an admin could merge past it. Nothing merged between 2026-09-12 and
-2026-09-18.
+Ruleset `main — merge queue` (23208287) manages landing changes on `main` using
+squash merges. Because both rulesets enforce branch protection with
+`bypass_actors: []`, all PRs land via the merge queue once required status
+checks pass and approvals are met.
 
-Review enforcement was **not** relaxed. The `required_status_checks` rule lived
-inside that same ruleset, so disabling it silently dropped CI enforcement too;
-the rule was immediately re-added to `main — review policy` (22705148). Effective
-rules on `main` are still `pull_request` (2 approvals) + `required_status_checks`
-+ `deletion` + `non_fast_forward`.
-
-Re-enable the queue only after a `merge_group:` trigger is on `main` — see #49 —
-and verify with the canary command in [Verification](#verification). Restoring
-the queue without that trigger re-freezes the repo.
+When `gh pr merge <PR>` is run, GitHub adds the PR to the merge queue, which
+spawns a `merge_group` workflow run against a temporary merge group ref. Once
+`validate extensions` completes successfully, GitHub merges the PR automatically.
 
 ## Only write-access approvals count
 
@@ -94,10 +88,8 @@ Permissions also change. On 2026-09-18 six collaborators went from `read` to
 2-of-2. **Re-derive the qualifying reviewer set at review time; never cache it.**
 
 Corollaries:
-- You cannot approve your own PR. An author needs two *other* write-access reviewers.
+- You cannot approve your own PR. An author needs a write-access reviewer other than themselves.
 - Multiple approvals from the same person count once.
-- `require_last_push_approval` means the approval must come from someone other
-  than whoever pushed last.
 
 ## The merge queue needs a `merge_group` trigger
 
