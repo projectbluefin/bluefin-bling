@@ -1,7 +1,7 @@
 ---
 name: pr-review-and-merge
-version: "1.0"
-last_updated: "2026-09-18"
+version: "1.1"
+last_updated: "2026-09-21"
 id: pr-review-and-merge
 one_line_purpose: Review, approve, and merge PRs under the main ruleset and merge queue.
 entry_point: docs/skills/pr-review-and-merge.md
@@ -126,6 +126,32 @@ on:
 The job name must match the required context **exactly**, and the job must be
 event-agnostic — no `if:`, no path filters, no `github.event.pull_request.*`
 references, or it will not instantiate for `merge_group`.
+
+## A required job must also be bounded
+
+A required context that *hangs* stalls the queue the same way a context that
+never starts does — the entry stays in `AWAITING_CHECKS` until
+`check_response_timeout_minutes` (90) drops it, and the runner keeps burning.
+GitHub's default job timeout is **360 minutes**, so an unbounded job can hold a
+queue slot four times longer than the queue is willing to wait, once per
+attempt.
+
+Every assertion in the suite spawns `node` (harness scenarios, `node --check`,
+`node -e`); a child that never writes to stdout and never exits produces a run
+with no output and no end. So the required job carries an explicit bound:
+
+```yaml
+jobs:
+  extension-validation:
+    name: validate extensions (tests, node --check, glib-compile-schemas)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+```
+
+Healthy runs finish in 20s–2m, so 15 minutes is generous; it exists to convert
+a hang into a fast, visible failure. Put it on the **job**, not a step — a step
+timeout leaves the rest of the job free to hang. Changing the bound never
+changes the job `name:`, which is the required status context.
 
 ## Triage order for a PR that will not merge
 

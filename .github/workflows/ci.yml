@@ -29,6 +29,11 @@ jobs:
   extension-validation:
     name: validate extensions (tests, node --check, glib-compile-schemas)
     runs-on: ubuntu-latest
+    # The whole suite runs in well under a minute; every assertion spawns node,
+    # so a harness that never exits would otherwise hold the required
+    # `validate extensions` context — and the merge queue entry waiting on it —
+    # for GitHub's 360-minute default.
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
