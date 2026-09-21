@@ -159,6 +159,26 @@ extension with no hardcoded list.
   `await`, not only before.
 - **Assuming a cancellable kills the child process.** It aborts the local stream
   read only. Connect to the cancellable and call `proc.force_exit()`.
+- **Pre-creating a directory a daemon would have created itself.**
+  `g_file_make_directory` (and the `_with_parents` walk built on it) takes no
+  mode argument: the directory lands at `0777 & umask`, which is `0755` on a
+  stock install. A daemon creating its own state directory typically uses
+  `0700`, so creating it first *widens* it, and the secrets it writes there
+  afterwards sit in a world-listable directory. GIO has no mode parameter to
+  pass, so set the mode as an attribute and do it *before* the daemon runs:
+  ```js
+  const info = new Gio.FileInfo()
+  info.set_attribute_uint32('unix::mode', 0o700)
+  // NOFOLLOW_SYMLINKS: chmod the link, never a target someone else chose.
+  file.set_attributes_async(
+      info, Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS,
+      GLib.PRIORITY_DEFAULT, cancellable, (source, res) => {
+          try { source.set_attributes_finish(res) } catch (e) { /* ... */ }
+      })
+  ```
+  Treat the failure as non-fatal — a home on a filesystem with no unix modes
+  must not lose the feature — but log it. `extensions/syncthing-toggle`'s
+  `_ensureSyncFolderConfig()` is the worked example.
 - **`logError('message', err)`.** The GJS signature is
   `logError(error, prefix)` — error first. Swapped arguments lose the stack trace.
 - **Interpolating a settings value into a command line.** Settings are

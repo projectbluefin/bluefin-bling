@@ -83,6 +83,33 @@ async function makeDirectoryWithParentsAsync(file, cancellable) {
 	}
 }
 
+// make_directory has no mode parameter, so a directory GIO creates lands at
+// 0777 & umask — 0755 on a stock install. Syncthing creating its own home uses
+// 0700, and pre-creating the directory here silently widens that. Set the mode
+// back explicitly.
+function setUnixModeAsync(file, mode, cancellable) {
+	return new Promise((resolve, reject) => {
+		const info = new Gio.FileInfo()
+		info.set_attribute_uint32('unix::mode', mode)
+		// NOFOLLOW_SYMLINKS: if the path is a symlink somebody else planted,
+		// this has to fail on the link rather than chmod whatever it aims at.
+		file.set_attributes_async(
+			info,
+			Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS,
+			GLib.PRIORITY_DEFAULT,
+			cancellable,
+			(source, res) => {
+				try {
+					source.set_attributes_finish(res)
+					resolve()
+				} catch (e) {
+					reject(e)
+				}
+			}
+		)
+	})
+}
+
 function loadContentsAsync(file, cancellable) {
 	return new Promise((resolve, reject) => {
 		file.load_contents_async(cancellable, (source, res) => {
@@ -391,6 +418,31 @@ export var ServiceIndicator = GObject.registerClass(
 			} catch (e) {
 				logError(e, 'Failed to create state directory')
 				return
+			}
+			if (this._destroyed)
+				return
+
+			// Before `syncthing generate` runs, not after: the next statement
+			// drops key.pem (the device TLS private key) and config.xml, whose
+			// <apikey> is full control of the local REST API, into this
+			// directory. Not tied to the create path above, so a state dir
+			// that exists but holds no config.xml — a half-finished or
+			// cleared-out seed — is narrowed too. An install that already has
+			// a config.xml returned above and keeps whatever mode it has;
+			// widening there is #69's remaining tail, not this change.
+			//
+			// A filesystem with no unix modes — or a state dir that turned out
+			// to be a symlink — refuses this. Log it and seed anyway: the
+			// secrets themselves are still written 0600, and an unusable Sync
+			// Folder toggle is the worse outcome.
+			try {
+				await setUnixModeAsync(
+					Gio.File.new_for_path(stateDir),
+					0o700,
+					this._cancellable
+				)
+			} catch (e) {
+				logError(e, 'Failed to restrict state directory permissions')
 			}
 			if (this._destroyed)
 				return

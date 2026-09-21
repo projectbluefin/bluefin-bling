@@ -47,6 +47,10 @@ CREATE_FLAGS_NONE = 0
 CREATE_FLAGS_PRIVATE = 1
 CREATE_FLAGS_REPLACE_DESTINATION = 2
 
+# Gio.FileQueryInfoFlags, likewise.
+QUERY_FLAGS_NONE = 0
+QUERY_FLAGS_NOFOLLOW_SYMLINKS = 1
+
 # Spelled in pieces on purpose: a repo-wide grep for this setting name has to
 # stay empty — never flipping it is the point, and a fixture carrying the
 # literal would hide a regression in plain sight.
@@ -710,6 +714,60 @@ class TestSyncthingToggleConfigSeeding(unittest.TestCase):
         result = run_scenario("config-seed")
         self.assertIn(f"{result['paths']['homeDir']}/Sync", result["createdDirs"])
         self.assertIn(result["paths"]["stateDir"], result["createdDirs"])
+
+    def test_the_state_directory_is_narrowed_to_0700_before_generate_runs(self):
+        # `syncthing generate` drops key.pem (the device TLS private key) and a
+        # config.xml whose <apikey> is full control of the local REST API into
+        # this directory. Syncthing creating the directory itself uses 0700;
+        # GIO's make_directory takes no mode and leaves 0755 under the stock
+        # umask, so pre-creating it here has to narrow it back — and has to do
+        # that before the secrets land, not after.
+        result = run_scenario("config-seed")
+        state_dir = result["paths"]["stateDir"]
+        self.assertEqual(result["modes"].get(state_dir), 0o700)
+        self.assertEqual(result["modesAtGenerate"][0].get(state_dir), 0o700)
+
+    def test_the_state_directory_mode_is_set_without_following_symlinks(self):
+        # A state dir that is a symlink somebody else planted must take the
+        # chmod on the link (where it fails) rather than on its target.
+        result = run_scenario("config-seed")
+        calls = [
+            call
+            for call in result["attributeCalls"]
+            if call["path"] == result["paths"]["stateDir"]
+        ]
+        self.assertTrue(calls, "expected the state directory mode to be set")
+        for call in calls:
+            self.assertEqual(call["flags"], QUERY_FLAGS_NOFOLLOW_SYMLINKS)
+
+    def test_nothing_but_the_state_directory_is_narrowed(self):
+        # ~/Sync holds the shared files and ~/.local/state is a shared XDG
+        # directory. Narrowing either would be a surprise, not hardening.
+        result = run_scenario("config-seed")
+        self.assertEqual(list(result["modes"]), [result["paths"]["stateDir"]])
+
+    def test_a_filesystem_that_refuses_the_mode_change_still_seeds(self):
+        # No unix modes to set (or a symlinked state dir): the secrets are
+        # still written 0600 by syncthing, so losing the whole Sync Folder
+        # feature over the hardening step would be the worse trade.
+        result = run_scenario("config-seed", setAttributesFails=True)
+        self.assertEqual(len(result["writes"]), 1)
+        self.assertEqual(result["modes"], {})
+        self.assertTrue(
+            any(
+                "permission" in part.lower()
+                for error in result["errors"]
+                for part in error
+            ),
+            f"expected a logged mode-change failure, got {result['errors']}",
+        )
+
+    def test_an_already_configured_state_directory_is_left_alone(self):
+        # The early return on a provisioned config (dakota's /etc/skel) must
+        # not chmod a directory the extension never created.
+        result = run_scenario("config-seed", configExists=True)
+        self.assertEqual(result["modes"], {})
+        self.assertEqual(result["attributeCalls"], [])
 
     def test_syncthing_is_generated_offline_into_the_state_directory(self):
         result = run_scenario("config-seed")
