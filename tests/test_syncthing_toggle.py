@@ -19,6 +19,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 TOGGLE_JS = REPO_ROOT / "extensions" / "syncthing-toggle" / "toggle.js"
 NODE = shutil.which("node")
 
+# Every assertion below runs by spawning node. Without a bound, a harness that
+# deadlocks -- a promise that never settles, a stubbed timeout that never fires
+# -- blocks the suite forever: locally it hangs the terminal, and in CI it holds
+# the required `validate extensions` status context until the job ceiling. A
+# whole suite run takes seconds, so this only ever fires on a real hang.
+NODE_TIMEOUT_SECONDS = 60
+
 
 def _validator_pattern() -> str:
     """Return the regex literal `_validatedServiceName` actually tests against.
@@ -77,6 +84,7 @@ def _eval_service_name_validator(name: str | None) -> bool:
         capture_output=True,
         text=True,
         check=True,
+        timeout=NODE_TIMEOUT_SECONDS,
     )
     return res.stdout.strip() == "true"
 

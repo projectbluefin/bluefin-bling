@@ -27,6 +27,13 @@ EXTENSION_JS = REPO_ROOT / "extensions" / "power-status-color" / "extension.js"
 
 NODE = shutil.which("node")
 
+# Every assertion below runs by spawning node. Without a bound, a harness that
+# deadlocks -- a promise that never settles, a stubbed timeout that never fires
+# -- blocks the suite forever: locally it hangs the terminal, and in CI it holds
+# the required `validate extensions` status context until the job ceiling. A
+# whole suite run takes seconds, so this only ever fires on a real hang.
+NODE_TIMEOUT_SECONDS = 60
+
 CLASS_OVERDUE = "power-status-overdue"
 CLASS_REBOOT = "power-status-reboot"
 
@@ -53,6 +60,7 @@ class PowerStatusColorTestCase(unittest.TestCase):
             capture_output=True,
             text=True,
             check=False,
+            timeout=NODE_TIMEOUT_SECONDS,
         )
         self.assertEqual(
             result.returncode,

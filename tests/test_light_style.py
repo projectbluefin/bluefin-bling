@@ -34,6 +34,13 @@ EXTENSION_JS = REPO_ROOT / "extensions" / "light-style" / "extension.js"
 
 NODE = shutil.which("node")
 
+# Every assertion below runs by spawning node. Without a bound, a harness that
+# deadlocks -- a promise that never settles, a stubbed timeout that never fires
+# -- blocks the suite forever: locally it hangs the terminal, and in CI it holds
+# the required `validate extensions` status context until the job ceiling. A
+# whole suite run takes seconds, so this only ever fires on a real hang.
+NODE_TIMEOUT_SECONDS = 60
+
 STYLE_CLASS = "light-style-active"
 INTERFACE_SCHEMA = "org.gnome.desktop.interface"
 COLOR_SCHEME_SIGNAL = "changed::color-scheme"
@@ -56,6 +63,7 @@ class LightStyleTestCase(unittest.TestCase):
             capture_output=True,
             text=True,
             check=False,
+            timeout=NODE_TIMEOUT_SECONDS,
         )
         self.assertEqual(
             result.returncode,
