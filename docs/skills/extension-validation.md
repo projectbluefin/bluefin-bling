@@ -81,17 +81,22 @@ any file a new extension added was silently never checked.
   `grep -n '^class ' tests/test_extension_manifest.py`
 
 `tests/test_extension_metadata.py`
-- `metadata.json` exists, parses, and carries `uuid`, `name`, `description`, `shell-version`
+- `metadata.json` exists, parses, and carries `uuid`, `name`, `description`,
+  `shell-version`, `url` and `version` — the full `REQUIRED_KEYS` tuple, checked for
+  presence in one place
 - `uuid` is exactly `<folder-name>@projectbluefin.io` — GNOME Shell refuses to load
   an extension whose uuid does not match its install directory, and reports it as
   simply missing
 - `uuid` is unique across the monorepo
 - `shell-version` is an ascending, deduplicated list of numeric strings, minimum 45
   (the first ESM-only release)
-- `version`, **when present**, is a positive integer, not a string; `url`, **when
-  present**, points at this repo. Neither key is required, and
-  `power-status-color` currently ships without both — do not read these as
-  repo-wide guarantees
+- `version` is a positive integer, not a string, and `url` is exactly `REPO_URL`.
+  Both are mandatory for every extension: `version` is the identity GNOME Shell and
+  extensions.gnome.org compare to decide an update exists, so a manifest without one
+  cannot express that it changed. These two were once checked only *when present*,
+  which meant the gate could only judge manifests that already complied — if you add
+  a value check here, put the key in `REQUIRED_KEYS` rather than guarding the test
+  with `if key not in data: continue`
 - `settings-schema` is declared **exactly when** `schemas/*.gschema.xml` ships
 
 `tests/test_extension_schemas.py`

@@ -22,7 +22,13 @@ from extension_manifest import (
     schema_files,
 )
 
-REQUIRED_KEYS = ("uuid", "name", "description", "shell-version")
+# Every key here is checked for presence once, by
+# TestMetadataJson.test_required_keys_present_and_non_empty. Keeping 'url' and
+# 'version' in this tuple is what stops the value tests below from having to
+# tolerate a missing key: an extension cannot opt out of the contract by leaving
+# one out. 'version' is the update identity GNOME Shell and extensions.gnome.org
+# compare, and 'url' is the provenance link back to this repo.
+REQUIRED_KEYS = ("uuid", "name", "description", "shell-version", "url", "version")
 
 
 class TestExtensionsDiscovered(unittest.TestCase):
@@ -117,11 +123,9 @@ class TestMetadataJson(unittest.TestCase):
                     f"{ext_dir.name}: repo targets GNOME {MIN_SHELL_VERSION}+ (ESM only)",
                 )
 
-    def test_version_is_positive_integer_when_present(self):
+    def test_version_is_positive_integer(self):
         for ext_dir in extension_dirs():
             data = load_metadata(ext_dir)
-            if "version" not in data:
-                continue
             with self.subTest(extension=ext_dir.name):
                 self.assertIsInstance(
                     data["version"],
@@ -130,11 +134,9 @@ class TestMetadataJson(unittest.TestCase):
                 )
                 self.assertGreater(data["version"], 0)
 
-    def test_url_points_at_this_repo_when_present(self):
+    def test_url_points_at_this_repo(self):
         for ext_dir in extension_dirs():
             data = load_metadata(ext_dir)
-            if "url" not in data:
-                continue
             with self.subTest(extension=ext_dir.name):
                 self.assertEqual(
                     data["url"],
