@@ -20,6 +20,13 @@ from extension_manifest import extension_dirs, js_sources
 
 NODE = shutil.which("node")
 
+# Every assertion below runs by spawning node. Without a bound, a harness that
+# deadlocks -- a promise that never settles, a stubbed timeout that never fires
+# -- blocks the suite forever: locally it hangs the terminal, and in CI it holds
+# the required `validate extensions` status context until the job ceiling. A
+# whole suite run takes seconds, so this only ever fires on a real hang.
+NODE_TIMEOUT_SECONDS = 60
+
 _ENABLE_RE = re.compile(r"\benable\s*\(\s*\)\s*\{")
 _DISABLE_RE = re.compile(r"\bdisable\s*\(\s*\)\s*\{")
 _DEFAULT_EXPORT_RE = re.compile(r"export\s+default\s+class\s+\w+\s+extends\s+Extension\b")
@@ -49,6 +56,7 @@ class TestJavaScriptSyntax(unittest.TestCase):
                     capture_output=True,
                     text=True,
                     check=False,
+                    timeout=NODE_TIMEOUT_SECONDS,
                 )
                 self.assertEqual(
                     result.returncode,

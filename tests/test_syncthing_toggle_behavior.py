@@ -33,6 +33,13 @@ TOGGLE_JS = REPO_ROOT / "extensions" / "syncthing-toggle" / "toggle.js"
 
 NODE = shutil.which("node")
 
+# Every assertion below runs by spawning node. Without a bound, a harness that
+# deadlocks -- a promise that never settles, a stubbed timeout that never fires
+# -- blocks the suite forever: locally it hangs the terminal, and in CI it holds
+# the required `validate extensions` status context until the job ceiling. A
+# whole suite run takes seconds, so this only ever fires on a real hang.
+NODE_TIMEOUT_SECONDS = 60
+
 EXTENSION_PATH = "/usr/share/gnome-shell/extensions/syncthing-toggle"
 
 # Gio.FileCreateFlags values as the harness models them.
@@ -66,7 +73,9 @@ def run_scenario(name: str, **options) -> dict:
     argv = [NODE, str(HARNESS), name]
     if options:
         argv.append(json.dumps(options))
-    result = subprocess.run(argv, capture_output=True, text=True)
+    result = subprocess.run(
+        argv, capture_output=True, text=True, timeout=NODE_TIMEOUT_SECONDS
+    )
     if result.returncode != 0:
         raise AssertionError(
             f"harness scenario {name!r} failed ({result.returncode}):\n"
