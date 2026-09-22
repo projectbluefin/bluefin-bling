@@ -32,6 +32,7 @@ bluefin-bling/
 ├── docs/
 │   ├── SKILL.md               # Task → skill router
 │   └── skills/                # Authoritative operational knowledge
+├── scripts/                  # CI and compatibility matrix orchestration
 ├── tests/                     # Discovery-based validation suite (stdlib unittest)
 ├── AGENTS.md
 ├── README.md
@@ -50,7 +51,7 @@ new top-level entry fails CI until it is named here.
 ### 1. `power-status-color` (Quick Settings Power Status Alert)
 
 **UUID:** `power-status-color@projectbluefin.io`  
-**Compatibility:** GNOME Shell 45, 46, 47, 48, 49, 50+
+**Compatibility:** GNOME Shell 45, 46, 47, 48, 49, 50, 51+
 
 Visually alters the Quick Settings power button color to indicate system reboot and maintenance state:
 
@@ -68,7 +69,7 @@ Visually alters the Quick Settings power button color to indicate system reboot 
 ### 2. `syncthing-toggle` (Sync Folder Peer Sharing Toggle)
 
 **UUID:** `syncthing-toggle@projectbluefin.io`  
-**Compatibility:** GNOME Shell 45, 46, 47, 48, 49, 50+
+**Compatibility:** GNOME Shell 45, 46, 47, 48, 49, 50, 51+
 
 A Quick Settings toggle for Bluefin's built-in Sync Folder peer sharing service. This is just a quadlet that runs the headless official syncthing container:
 
@@ -86,7 +87,7 @@ A Quick Settings toggle for Bluefin's built-in Sync Folder peer sharing service.
 
 **UUID:** `light-style@projectbluefin.io`  
 **Display name:** Bluefin Light Style — deliberately distinct from the upstream `light-style@gnome-shell-extensions.gcampax.github.com` extension, which presents as plain "Light Style".  
-**Compatibility:** GNOME Shell 45, 46, 47, 48, 49, 50+
+**Compatibility:** GNOME Shell 45, 46, 47, 48, 49, 50, 51+
 
 Makes GNOME Shell itself follow the desktop light/dark preference, rather than
 repainting the Shell from the extension:

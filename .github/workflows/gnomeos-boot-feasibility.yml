@@ -1,0 +1,41 @@
+name: gnomeos-boot-feasibility
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  resolve-channels:
+    name: resolve channels & digests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Resolve stable major and pinned digests
+        id: resolve
+        run: python3 scripts/resolve_gnome_channels.py
+
+  matrix-test:
+    name: test ${{ matrix.channel }} (${{ matrix.image_tag }})
+    needs: resolve-channels
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.resolve-channels.outputs.matrix) }}
+    uses: projectbluefin/testsuite/.github/workflows/e2e.yml@ee922d161079d759769e85958357576ab91d5f7a # v1
+    with:
+      image: ${{ matrix.image_digest }}
+      suites: vanilla-gnome
+      compose_image: false

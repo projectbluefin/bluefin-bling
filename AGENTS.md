@@ -52,6 +52,7 @@ bluefin-bling/
 ├── docs/
 │   ├── SKILL.md               # Task → skill router
 │   └── skills/                # Authoritative operational knowledge
+├── scripts/                  # CI and compatibility matrix orchestration
 ├── tests/                     # Discovery-based validation suite (stdlib unittest)
 ├── .github/
 │   └── workflows/ci.yml       # Runs the validation suite on every PR and on main

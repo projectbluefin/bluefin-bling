@@ -209,6 +209,12 @@ Detecting a GSettings key reference is regex-based
 If a source starts reaching settings through some other shape, teach that helper
 the new shape — otherwise the unknown-key test goes quietly blind.
 
+`tests/test_compat_scripts.py`
+- covers `scripts/evaluate_aggregate_compat.py` and `scripts/file_compat_issue.py`
+- enforces fail-closed evaluation: fails on missing channel artifacts, ambiguous duplicate artifacts,
+  or infrastructure errors
+- enforces issue reporting: fails on empty/missing artifacts and reports run infrastructure errors
+
 ## Red Flags
 
 - **A gate that passes when the thing it guards is broken.** Static extraction
