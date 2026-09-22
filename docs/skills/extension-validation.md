@@ -166,11 +166,17 @@ any file a new extension added was silently never checked.
 ## Behavioural harnesses
 
 The checks above read source text. A harness instead *runs* the shipped source:
-`tests/syncthing_toggle_harness.mjs` and `tests/power_status_color_harness.mjs`
-read the real `.js` file, rewrite **only** its `gi://` and
+`tests/syncthing_toggle_harness.mjs`, `tests/syncthing_prefs_harness.mjs`,
+`tests/syncthing_extension_harness.mjs`, `tests/light_style_harness.mjs` and
+`tests/power_status_color_harness.mjs` read the real `.js` file, rewrite **only**
+its `gi://` and
 `resource:///org/gnome/shell/…` import block into bindings taken from
 `globalThis`, and import the result as a base64 `data:` module. Everything below
 the import block — the logic under test — executes byte-for-byte as shipped.
+`tests/gnome_module_loader.mjs` owns that rewrite so the grammar lives in one
+place; a harness whose module also imports a sibling of its own — as
+`syncthing-toggle/extension.js` imports `./toggle.js`, which no `data:` URL can
+resolve — passes a second `rewrite` pass to the loader.
 Each harness takes a scenario name and a JSON options blob on argv and prints a
 single JSON object describing what the extension did; the matching
 `tests/test_*_behavior.py` asserts on that JSON.
