@@ -55,7 +55,7 @@ def resolve_tag_digest(tag: str) -> str:
     digest = tags[0].get("manifest_digest")
     if not digest:
         raise RuntimeError(f"No manifest_digest found for tag {tag}")
-    if not re.match(r"^sha256:[0-9a-f]{64}$", digest):
+    if not re.match(r"^sha256:[0-9a-f]{64}\Z", digest):
         raise ValueError(f"Invalid manifest_digest format for tag {tag}: {digest}")
     return digest
 

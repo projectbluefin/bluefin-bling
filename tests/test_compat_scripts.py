@@ -242,6 +242,18 @@ class TestResolveGnomeChannels(unittest.TestCase):
         finally:
             self.mod.fetch_url = original_fetch
 
+    def test_resolve_tag_digest_rejects_trailing_newline(self):
+        valid_hash = "a" * 64
+        mock_data = json.dumps({"tags": [{"manifest_digest": f"sha256:{valid_hash}\n"}]})
+        original_fetch = self.mod.fetch_url
+        try:
+            self.mod.fetch_url = lambda url, timeout=15: mock_data
+            with self.assertRaises(ValueError) as ctx:
+                self.mod.resolve_tag_digest("gnomeos-48")
+            self.assertIn("Invalid manifest_digest format", str(ctx.exception))
+        finally:
+            self.mod.fetch_url = original_fetch
+
     def test_discover_latest_stable_major_extracts_version(self):
         atom_xml = """<?xml version="1.0" encoding="utf-8"?>
         <feed xmlns="http://www.w3.org/2005/Atom">
