@@ -30,15 +30,17 @@ def run_gh_cmd(argv: list[str]) -> tuple[int, str, str]:
     return res.returncode, res.stdout.strip(), res.stderr.strip()
 
 
-def check_existing_open_issue(title: str) -> tuple[bool, str | None]:
-    """Check if an open issue with the exact title already exists.
+def check_existing_open_issue(uuid: str, channel: str, exact_title: str) -> tuple[bool, str | None]:
+    """Check if an open issue for uuid and channel matching exact_title already exists.
 
+    Searches by stable tokens (uuid and channel) to avoid punctuation-dropping in
+    GitHub search, then verifies the exact title against matched candidates.
     Returns (exists, error_message).
     """
     code, stdout, stderr = run_gh_cmd([
         "issue", "list",
         "--state", "open",
-        "--search", f'"{title}" in:title',
+        "--search", f"{uuid} {channel} in:title",
         "--json", "number,title"
     ])
     if code != 0:
@@ -49,7 +51,7 @@ def check_existing_open_issue(title: str) -> tuple[bool, str | None]:
         if not isinstance(issues, list):
             return False, "Unexpected output structure from gh issue list"
         for issue in issues:
-            if isinstance(issue, dict) and issue.get("title", "").strip() == title.strip():
+            if isinstance(issue, dict) and issue.get("title", "").strip() == exact_title.strip():
                 return True, None
     except Exception as exc:
         return False, f"Failed parsing gh issue list JSON: {exc}"
@@ -194,7 +196,7 @@ def main() -> None:
 
             title = f"bug(compat): {uuid} failing on GNOME {channel} ({phase})"
 
-            exists, err = check_existing_open_issue(title)
+            exists, err = check_existing_open_issue(uuid, channel, title)
             if err:
                 print(f"::error::Failed checking existing issue for '{title}': {err}", file=sys.stderr)
                 has_errors = True

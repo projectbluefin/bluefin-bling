@@ -13,6 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 EVAL_SCRIPT = SCRIPTS_DIR / "evaluate_aggregate_compat.py"
 ISSUE_SCRIPT = SCRIPTS_DIR / "file_compat_issue.py"
+RESOLVE_SCRIPT = SCRIPTS_DIR / "resolve_gnome_channels.py"
 
 
 class TestEvaluateAggregateCompat(unittest.TestCase):
@@ -209,6 +210,96 @@ class TestFileCompatIssue(unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
         self.assertIn("Triggering workflow concluded with 'failure'", proc.stderr)
 
+
+class TestResolveGnomeChannels(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        import resolve_gnome_channels
+        self.mod = resolve_gnome_channels
+
+    def tearDown(self):
+        sys.path.remove(str(SCRIPTS_DIR))
+
+    def test_resolve_tag_digest_validates_sha256_format(self):
+        valid_hash = "a" * 64
+        mock_data = json.dumps({"tags": [{"manifest_digest": f"sha256:{valid_hash}"}]})
+        original_fetch = self.mod.fetch_url
+        try:
+            self.mod.fetch_url = lambda url, timeout=15: mock_data
+            digest = self.mod.resolve_tag_digest("gnomeos-48")
+            self.assertEqual(digest, f"sha256:{valid_hash}")
+        finally:
+            self.mod.fetch_url = original_fetch
+
+    def test_resolve_tag_digest_rejects_invalid_digest_format(self):
+        mock_data = json.dumps({"tags": [{"manifest_digest": "not-a-valid-sha256"}]})
+        original_fetch = self.mod.fetch_url
+        try:
+            self.mod.fetch_url = lambda url, timeout=15: mock_data
+            with self.assertRaises(ValueError) as ctx:
+                self.mod.resolve_tag_digest("gnomeos-48")
+            self.assertIn("Invalid manifest_digest format", str(ctx.exception))
+        finally:
+            self.mod.fetch_url = original_fetch
+
+    def test_discover_latest_stable_major_extracts_version(self):
+        atom_xml = """<?xml version="1.0" encoding="utf-8"?>
+        <feed xmlns="http://www.w3.org/2005/Atom">
+          <entry>
+            <title>Introducing GNOME 50</title>
+          </entry>
+        </feed>"""
+        original_fetch = self.mod.fetch_url
+        try:
+            self.mod.fetch_url = lambda url, timeout=15: atom_xml
+            major = self.mod.discover_latest_stable_major()
+            self.assertEqual(major, "50")
+        finally:
+            self.mod.fetch_url = original_fetch
+
+
+class TestCheckExistingOpenIssue(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        import file_compat_issue
+        self.mod = file_compat_issue
+
+    def tearDown(self):
+        sys.path.remove(str(SCRIPTS_DIR))
+
+    def test_check_existing_open_issue_matches_exact_title(self):
+        exact_title = "bug(compat): ext@projectbluefin.io failing on GNOME stable (enable)"
+        mock_issues = [{"number": 12, "title": exact_title}]
+        original_run_gh = self.mod.run_gh_cmd
+        captured_args = []
+        try:
+            def mock_run_gh(argv):
+                captured_args.append(argv)
+                return 0, json.dumps(mock_issues), ""
+            self.mod.run_gh_cmd = mock_run_gh
+            exists, err = self.mod.check_existing_open_issue(
+                "ext@projectbluefin.io", "stable", exact_title
+            )
+            self.assertIsNone(err)
+            self.assertTrue(exists)
+            self.assertIn("ext@projectbluefin.io stable in:title", captured_args[0])
+        finally:
+            self.mod.run_gh_cmd = original_run_gh
+
+    def test_check_existing_open_issue_rejects_different_title(self):
+        exact_title = "bug(compat): ext@projectbluefin.io failing on GNOME stable (enable)"
+        different_title = "bug(compat): ext@projectbluefin.io failing on GNOME stable (install/schema)"
+        mock_issues = [{"number": 12, "title": different_title}]
+        original_run_gh = self.mod.run_gh_cmd
+        try:
+            self.mod.run_gh_cmd = lambda argv: (0, json.dumps(mock_issues), "")
+            exists, err = self.mod.check_existing_open_issue(
+                "ext@projectbluefin.io", "stable", exact_title
+            )
+            self.assertIsNone(err)
+            self.assertFalse(exists)
+        finally:
+            self.mod.run_gh_cmd = original_run_gh
 
 if __name__ == "__main__":
     unittest.main()

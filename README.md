@@ -11,7 +11,9 @@ This monorepo maintains extensions and visual integrations tailored for Bluefin 
 ```
 bluefin-bling/
 ├── .github/
-│   └── workflows/ci.yml       # Runs the validation suite on every PR and on main
+│   └── workflows/
+│       ├── ci.yml                          # Runs the validation suite on every PR and on main
+│       └── gnomeos-boot-feasibility.yml     # Manual feasibility probe for GNOME OS channels
 ├── extensions/
 │   ├── light-style/           # Follows the desktop color-scheme into GNOME Shell's light theme
 │   │   ├── metadata.json

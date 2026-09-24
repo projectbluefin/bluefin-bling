@@ -55,7 +55,9 @@ bluefin-bling/
 ├── scripts/                  # CI and compatibility matrix orchestration
 ├── tests/                     # Discovery-based validation suite (stdlib unittest)
 ├── .github/
-│   └── workflows/ci.yml       # Runs the validation suite on every PR and on main
+│   └── workflows/
+│       ├── ci.yml                          # Runs the validation suite on every PR and on main
+│       └── gnomeos-boot-feasibility.yml     # Manual feasibility probe for GNOME OS channels
 ├── AGENTS.md
 ├── README.md
 ├── SECURITY.md
