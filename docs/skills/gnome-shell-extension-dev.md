@@ -28,7 +28,7 @@ metadata:
 
 # GNOME Shell Extension Development (GNOME 45+)
 
-Bluefin extensions target modern GNOME Shell releases (GNOME 45 through 50+) using native ECMAScript Modules (ESM). Deprecated `imports.*` and legacy extension interfaces are prohibited.
+Bluefin extensions target modern GNOME Shell releases (GNOME 45 through 51+) using native ECMAScript Modules (ESM). Deprecated `imports.*` and legacy extension interfaces are prohibited.
 
 ## When to Use
 
