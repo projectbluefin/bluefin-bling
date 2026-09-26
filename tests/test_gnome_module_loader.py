@@ -17,12 +17,36 @@ today.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import unittest
 from pathlib import Path
 
-HARNESS = Path(__file__).resolve().parent / "gnome_module_loader_harness.mjs"
+TESTS_DIR = Path(__file__).resolve().parent
+HARNESS = TESTS_DIR / "gnome_module_loader_harness.mjs"
+
+# The shim's own harness is the one file allowed to name the grammar: it exists
+# to exercise `rewriteGnomeImports` and `asDataModule` directly.
+SHIM_OWNER_HARNESS = "gnome_module_loader_harness.mjs"
+
+# Markers of a private reimplementation of the rewrite: a regex literal that
+# matches GNOME module specifiers, and the `data:` module encoding. Either one
+# appearing outside the owner means a harness has grown its own copy of the
+# grammar again.
+_OWNED_GRAMMAR_MARKERS = (
+    (re.compile(r"/[^/\n]*gi:\\/\\/"), "a regex literal matching `gi://` specifiers"),
+    (re.compile(r"data:text/javascript"), "the `data:` module encoding"),
+)
+
+
+def behavior_harnesses() -> list[Path]:
+    """Every harness that loads a shipped source, owner's own harness excluded."""
+    return sorted(
+        path
+        for path in TESTS_DIR.glob("*_harness.mjs")
+        if path.name != SHIM_OWNER_HARNESS
+    )
 
 NODE = shutil.which("node")
 
@@ -169,6 +193,45 @@ class GnomeModuleLoaderTestCase(unittest.TestCase):
         result = self.run_scenario("dataModule", source=source)
         self.assertTrue(result["hasPrefix"])
         self.assertEqual(result["decoded"], source)
+
+
+class ShimHasOneOwnerTestCase(unittest.TestCase):
+    """No harness may reimplement the grammar this module owns.
+
+    `gnome_module_loader.mjs` was introduced because the rewrite had been copied
+    into each harness and the copies drifted — one handled `import {gettext as _}`
+    and the other emitted a `SyntaxError` for it. Nothing stopped a copy from
+    reappearing, and two later did. These assertions discover harnesses rather
+    than listing them, so a new one is held to the same rule on the day it lands.
+    """
+
+    def test_harnesses_are_discovered(self):
+        """An empty scan would make the assertions below vacuous."""
+        names = [path.name for path in behavior_harnesses()]
+        self.assertIn("light_style_harness.mjs", names)
+        self.assertGreaterEqual(len(names), 4, names)
+
+    def test_every_harness_loads_through_the_shared_shim(self):
+        for path in behavior_harnesses():
+            with self.subTest(harness=path.name):
+                source = path.read_text(encoding="utf-8")
+                if "from './gnome_module_loader.mjs'" not in source:
+                    self.fail(
+                        f"tests/{path.name} does not import the shared shim; "
+                        "call loadGnomeModule() instead of rewriting imports here"
+                    )
+
+    def test_no_harness_reimplements_the_rewrite_grammar(self):
+        for path in behavior_harnesses():
+            source = path.read_text(encoding="utf-8")
+            for pattern, description in _OWNED_GRAMMAR_MARKERS:
+                with self.subTest(harness=path.name, marker=description):
+                    if pattern.search(source):
+                        self.fail(
+                            f"tests/{path.name} contains {description}, which "
+                            "gnome_module_loader.mjs owns; a second copy drifts "
+                            "the moment GNOME changes its import surface"
+                        )
 
 
 if __name__ == "__main__":
