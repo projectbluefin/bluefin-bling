@@ -105,6 +105,13 @@ def main() -> None:
         sys.exit(1)
 
     expected_channels = {c.strip() for c in args.expected_channels.split(",") if c.strip()}
+    if not expected_channels:
+        print("::error::Expected channels list cannot be empty", file=sys.stderr)
+        sys.exit(1)
+    unknown_expected = expected_channels - VALID_CHANNELS
+    if unknown_expected:
+        print(f"::error::Unknown expected channels: {sorted(unknown_expected)}", file=sys.stderr)
+        sys.exit(1)
     artifact_files = sorted(artifacts_dir.glob("**/compat-results-*.json"))
     if not artifact_files:
         if args.workflow_conclusion and args.workflow_conclusion != "success":
@@ -149,6 +156,10 @@ def main() -> None:
             continue
 
         doc_channel = doc.get("channel")
+        if doc_channel not in VALID_CHANNELS:
+            print(f"::error::Invalid channel '{doc_channel}' in {file_path}", file=sys.stderr)
+            has_errors = True
+            continue
         if doc_channel != channel:
             print(f"::error::Channel in file '{doc_channel}' does not match expected '{channel}' in {file_path}", file=sys.stderr)
             has_errors = True

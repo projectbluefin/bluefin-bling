@@ -163,6 +163,9 @@ def main() -> None:
     artifacts_dir = Path(args.artifacts_dir)
     extensions_dir = Path(args.extensions_dir)
     expected_channels = [c.strip() for c in args.expected_channels.split(",") if c.strip()]
+    if not expected_channels:
+        print("::error::Expected channels list cannot be empty", file=sys.stderr)
+        sys.exit(1)
 
     try:
         expected_uuids = discover_expected_uuids(extensions_dir)

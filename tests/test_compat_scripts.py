@@ -313,5 +313,41 @@ class TestCheckExistingOpenIssue(unittest.TestCase):
         finally:
             self.mod.run_gh_cmd = original_run_gh
 
+    def test_evaluate_aggregate_compat_fails_on_empty_expected_channels(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            res = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS_DIR / "evaluate_aggregate_compat.py"),
+                    "--artifacts-dir",
+                    tmpdir,
+                    "--expected-channels",
+                    "",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(res.returncode, 1)
+            self.assertIn("Expected channels list cannot be empty", res.stderr)
+
+    def test_file_compat_issue_fails_on_empty_expected_channels(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            res = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS_DIR / "file_compat_issue.py"),
+                    "--artifacts-dir",
+                    tmpdir,
+                    "--expected-channels",
+                    "",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(res.returncode, 1)
+            self.assertIn("Expected channels list cannot be empty", res.stderr)
+
 if __name__ == "__main__":
     unittest.main()
