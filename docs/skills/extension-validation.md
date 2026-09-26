@@ -163,6 +163,24 @@ any file a new extension added was silently never checked.
   payloads. `SECURITY.md` depends on the invariant it guards — do not weaken it
   without updating that file too
 
+`tests/test_extension_coverage.py`
+- the discovery side of the behavioural harnesses below: every gate above is
+  shape-only (a `disable()` with the right teardown keywords in its body is not
+  proof it runs correctly), so this asserts that every `.js` under `extensions/`
+  is actually *executed* by something. For each `js_sources(ext_dir)` entry, some
+  `tests/*_harness.mjs` must resolve that exact path
+  (`extension_manifest.harness_covers_source()`), and some `tests/test_*.py` must
+  spawn that harness through node (`extension_manifest.harness_is_exercised()`) —
+  a harness nothing runs proves nothing
+- `tests/gnome_module_loader_harness.mjs` is the one exempt harness: it exercises
+  the shared import-rewrite shim directly against synthetic sources, not a
+  shipped `extensions/` path, so it can never "cover" one
+- deliberate gaps belong in `UNCOVERED_SOURCES`, a shrinking ratchet keyed to a
+  repo-relative path. It is empty today. `TestRatchetIsAccurate` fails an entry
+  that is stale in either direction — already covered, or no longer a real file —
+  so remove the entry in the same PR that adds the harness rather than leaving it
+  behind
+
 ## Behavioural harnesses
 
 The checks above read source text. A harness instead *runs* the shipped source:
