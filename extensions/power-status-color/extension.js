@@ -104,7 +104,7 @@ export default class PowerStatusColorExtension extends Extension {
             }
         }
 
-        // 2. Periodic poll every 5 minutes
+        // Periodic poll every 5 minutes
         this._timeoutId = GLib.timeout_add_seconds(
             GLib.PRIORITY_DEFAULT,
             CHECK_INTERVAL_SECONDS,
@@ -114,7 +114,7 @@ export default class PowerStatusColorExtension extends Extension {
             }
         );
 
-        // 3. Initial check
+        // Initial check
         this._checkStatus();
     }
 
@@ -246,7 +246,7 @@ export default class PowerStatusColorExtension extends Extension {
                 return true;
         }
 
-        // 2. Pure bootc staged deployment check (bootc documentation convention)
+        // Pure bootc staged deployment check (bootc documentation convention)
         try {
             const stdout = await runCommandAsync(['bootc', 'status', '--format=json'], cancellable);
             if (stdout) {

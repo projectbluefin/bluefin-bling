@@ -54,7 +54,7 @@ new top-level entry fails CI until it is named here.
 
 Visually alters the Quick Settings power button color to indicate system reboot and maintenance state:
 
-- 🟡 **Yellow Alert (`#f6d32d`):** Reboot required. Triggered by bootc's `/run/composefs/staged-deployment` or `/run/ostree/staged-deployment` marker, a standard `/run/reboot-required` flag (including `/var/run/reboot-required`), or `bootc status --format=json` with `status.staged != null` when that command is permitted.
+- 🟡 **Yellow Alert (`#f6d32d`):** Reboot required. Triggered by bootc's `/run/composefs/staged-deployment` marker, OSTree's `/run/ostree/staged-deployment` marker (also present on rpm-ostree hosts without bootc), a standard `/run/reboot-required` flag (including `/var/run/reboot-required`), or `bootc status --format=json` with `status.staged != null` when that command is permitted.
 - 🔴 **Red Alert (`#e01b24`):** High uptime / reboot overdue. Triggered when host system uptime reaches or exceeds 30 days (`>= 2,592,000` seconds). Takes precedence over yellow reboot alerts.
 - ⚪ **Normal State:** Standard system theme styling when neither condition is met or when the extension is disabled.
 
@@ -144,22 +144,33 @@ gnome-extensions info syncthing-toggle@projectbluefin.io
 ### Testing Alert States (`power-status-color`)
 
 #### 1. Reboot Required (Yellow)
-Use an existing real staged deployment or reboot requirement. Inspect it without changing system flags:
+Create a temporary flag file:
+```bash
+sudo touch /run/reboot-required
+```
+The power icon turns yellow immediately via the file monitor.
+
+Clear the alert:
+```bash
+sudo rm -f /run/reboot-required
+```
+
+The same yellow state is produced by a real staged deployment. Inspect the
+markers the extension watches without changing anything:
 ```bash
 for marker in /run/composefs/staged-deployment /run/ostree/staged-deployment /run/reboot-required /var/run/reboot-required; do
   test ! -e "$marker" || printf '%s\n' "$marker"
 done
 bootc status --format=json # optional; may require permissions unavailable to Shell
-cat /proc/uptime
 ```
-With uptime below 30 days and a real pending restart, open Quick Settings and verify the rendered yellow power icon. If no real restart is pending, use the behavioural harness rather than creating or removing system flags. Follow the authoritative [live reboot-alert QA procedure](docs/skills/quick-settings-integration.md#live-reboot-alert-qa) for installed-build checks, red precedence, and restoration.
 
 #### 2. Uptime Overdue (Red)
-Run the complete affected test module against unchanged production source:
+To simulate 30+ days uptime without waiting, temporarily set `UPTIME_THRESHOLD_SECONDS = 60` in `extensions/power-status-color/extension.js`, restart or re-enable the extension, and observe the red icon. Restore the production value afterwards.
+
+The decision logic (including the exact boundary — **2,591,999 seconds is not overdue; 2,592,000 seconds is overdue**) is covered without touching the system:
 ```bash
 python3 -m unittest discover -s tests -t tests -v -p 'test_power_status_color.py'
 ```
-The boundary is exact: **2,591,999 seconds is not overdue; 2,592,000 seconds is overdue**. The harness proves logic, not rendered UI. Use the linked live QA procedure to capture red precedence and the restored real-input state; keep the production threshold unchanged.
 
 ---
 

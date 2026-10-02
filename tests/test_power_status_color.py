@@ -42,6 +42,19 @@ THRESHOLD_SECONDS = 30 * DAY_SECONDS
 
 REBOOT_FLAG = "/run/reboot-required"
 LEGACY_REBOOT_FLAG = "/var/run/reboot-required"
+COMPOSEFS_STAGED_MARKER = "/run/composefs/staged-deployment"
+OSTREE_STAGED_MARKER = "/run/ostree/staged-deployment"
+
+# The watch set the extension is allowed to install. A regression back to a
+# broad directory watch (or an extra path) would widen this and is what keeps
+# `test_unrelated_file_event_does_not_trigger_a_recheck` honest now that an
+# unwatched path simply has no monitor to fire.
+WATCHED_PATHS = [
+    REBOOT_FLAG,
+    LEGACY_REBOOT_FLAG,
+    COMPOSEFS_STAGED_MARKER,
+    OSTREE_STAGED_MARKER,
+]
 
 BOOTC_STAGED = json.dumps({"status": {"staged": {"image": {"image": "ghcr.io/x:y"}}}})
 BOOTC_CLEAN = json.dumps({"status": {"staged": None, "booted": {"image": {}}}})
@@ -568,6 +581,15 @@ class TestLifecycle(PowerStatusColorTestCase):
             existingFlagFiles=[REBOOT_FLAG],
         )
         self.assertEqual(result["classes"], [], "unwatched paths must not trigger a recheck")
+        # A per-file monitor makes the event above a no-op by construction, so
+        # the real regression to guard is the watch set itself: a directory
+        # watch on /run (or any extra path) would react to unrelated churn.
+        self.assertCountEqual(
+            result["monitoredPaths"],
+            WATCHED_PATHS,
+            "only the documented reboot/staged markers may be watched",
+        )
+        self.assertNotIn("/run", result["monitoredPaths"])
 
     def test_poll_callback_rechecks_and_keeps_the_source_alive(self):
         result = self.run_scenario(

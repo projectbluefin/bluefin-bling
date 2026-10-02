@@ -228,10 +228,9 @@ grep -n 'REBOOT_FLAG_FILES\|_statusQueued\|is_cancelled\|generation' extensions/
 ```
 
 These runs prove logic under stubs, **not** the installed build, permissions,
-actor styling, or visible pixels. Also follow [live reboot-alert QA](quick-settings-integration.md#live-reboot-alert-qa)
-to compare source/installed UUID, observe actual Quick Settings, and prove red
-precedence followed by the restored real-input state. Keep thresholds and system
-flags unchanged; complete QA includes restored methods and released owned resources.
+actor styling, or visible pixels. Confirm the rendered Quick Settings power
+button on an installed build before claiming a visual fix, and keep thresholds
+and system flags restored afterwards.
 
 ## Extending the suite
 

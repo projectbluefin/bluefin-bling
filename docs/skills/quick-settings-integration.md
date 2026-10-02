@@ -1,7 +1,7 @@
 ---
 name: quick-settings-integration
-version: "1.2"
-last_updated: "2026-10-02"
+version: "1.1"
+last_updated: "2026-09-18"
 id: quick-settings-integration
 one_line_purpose: Integrating indicators, toggles, and notifications into GNOME Quick Settings.
 entry_point: docs/skills/quick-settings-integration.md
@@ -105,88 +105,6 @@ const body = isEnabled
 
 Main.notify(title, body);
 ```
-
-## Live Reboot-Alert QA
-
-Harness results prove decision logic; shipping a power-button change also requires
-the actual rendered Quick Settings surface and restoration of real inputs.
-
-### Establish the running build and real state
-
-1. Inspect `gnome-extensions list` and `gnome-extensions info "$UUID"` to identify
-   the loaded UUID and installation path. Compare that path's `extension.js` and
-   `stylesheet.css` with the source (`cmp`), and read its `metadata.json`. If an
-   image uses another UUID, install a user override with **that same UUID**, matching
-   directory and metadata; enable only one copy so two pollers cannot compete.
-   Preserve version-validation and Shell Eval policies. Normal code updates need
-   logout/login: module imports are cached, and disable/enable is not a reload.
-2. Read `/proc/uptime` and inspect the four marker paths in
-   `extensions/power-status-color/extension.js`; optionally read
-   `bootc status --format=json` when permitted. A native staged marker works even
-   when Shell cannot run bootc successfully. Use real pending deployments for
-   yellow; leave existing system flags untouched. Without one, harness evidence
-   does not establish live yellow or red-over-yellow precedence.
-3. After enable, wait with a finite deadline until **both** `_checkingStatus` and
-   `_statusQueued` are false before inspecting the power actor or asserting state.
-   Open Quick Settings and capture the rendered icon, not merely its CSS classes.
-
-### Reach the native evaluator safely
-
-Use Alt+F2 → `lg` → Evaluator. Upstream Looking Glass documentation describes
-pre-imported `Main`, dynamic imports (`await import(...)`), and saved history/results.
-Inspect the installed Shell/extension APIs before using private actor paths. Verify
-the input text exactly before Return, then identify the newly produced result:
-an old `r(n)` row or historical error is not evidence that the current expression ran.
-Use `Main.extensionManager.lookup(UUID).stateObj` only after confirming that shape
-in the installed Shell, and confirm it is the active instance for the chosen UUID.
-
-For automated input, a missing `gnome-shell` AT-SPI application is a diagnostic,
-not a reason to alter accessibility preferences. Probe in a fresh subprocess to
-avoid cached GLib/AT-SPI environment state. Bound Ponytail's `Connected` wait (its
-installed `connectMonitor`/`connectWindow` loops may lack a timeout); release every
-pressed modifier in `finally`. If the controller fails, create an **owned** native
-Mutter RemoteDesktop session using one persistent D-Bus connection. Introspect
-the service and the returned session before invoking methods; use direct keysym
-press/release pairs with settle delays, releasing held keys and stopping that
-session in `finally`. Keep the shared controller daemon running.
-
-```bash
-gdbus introspect --session --dest org.gnome.Mutter.RemoteDesktop \
-  --object-path /org/gnome/Mutter/RemoteDesktop
-gdbus introspect --session --dest org.gnome.Mutter.ScreenCast \
-  --object-path /org/gnome/Mutter/ScreenCast
-```
-
-For visual capture, use an owned Mutter ScreenCast session with finite waits for
-stream readiness and frames. Decode mapped video using `GstVideo` row stride,
-not `width * bytes_per_pixel`; stop the pipeline and only sessions created by
-this QA connection. `AccessDenied` on a foreign session means cleanup failed,
-not that it stopped or that ownership can be bypassed.
-
-### Prove red precedence, then restore
-
-With a real pending restart and real uptime below 30 days, make a unique temporary
-copy of the tested extension module. Redirect **only** its `'/proc/uptime'` literal
-to an owned temporary fixture containing `2592000 0\n`; keep its imports, threshold,
-and all other logic unchanged. Dynamically import that unique file in the native
-Evaluator without enabling another extension or constructing another poller.
-Borrow the imported class prototype's `_checkUptimeOverdue`, bound to the running
-instance; its real `_checkStatus()` still checks the real pending deployment.
-
-Before replacement, save the original method and its own-property descriptor
-(including whether it was inherited). Arm bounded automatic restoration **before**
-the replacement, and also restore in `finally`: restore the descriptor if owned,
-otherwise delete the temporary own property. Wait for idle before replacement;
-call `_checkStatus()`, wait for both status flags to clear, and capture the rendered
-red icon. Restore the original method, rerun `_checkStatus()`, wait for idle, and
-capture the real-uptime yellow icon while the real deployment remains pending.
-Remove the auto-restore source, fixture, module copy, and other owned temporary
-files/resources after restoration. A timeout or failed capture still requires
-restoration; leave no production edits or reusable status stubs behind.
-
-Completion requires fresh rendered evidence for the claimed states, the original
-method/property state restored, a final real-input check, and all owned input and
-capture resources released. Record any unavailable live state as unverified.
 
 ## Red Flags
 

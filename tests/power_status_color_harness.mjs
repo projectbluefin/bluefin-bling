@@ -416,7 +416,7 @@ const scenarios = {
     },
 
     async monitorTrigger(options) {
-        const {ext, button, fireMonitorChange} = await buildExtension(options);
+        const {ext, button, fireMonitorChange, monitors} = await buildExtension(options);
         ext.enable();
         await new Promise(resolve => setTimeout(resolve, 0));
         button.remove_style_class_name('power-status-overdue');
@@ -424,8 +424,9 @@ const scenarios = {
         fireMonitorChange(options.changedBasename);
         await new Promise(resolve => setTimeout(resolve, 0));
         const classes = button.classes();
+        const monitoredPaths = monitors.map(m => m.path);
         ext.disable();
-        return {classes};
+        return {classes, monitoredPaths};
     },
 
     async timerCallback(options) {
