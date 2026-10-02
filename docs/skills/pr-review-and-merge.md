@@ -128,9 +128,10 @@ GitHub's default job timeout is **360 minutes**, so an unbounded job can hold a
 queue slot four times longer than the queue is willing to wait, once per
 attempt.
 
-Every assertion in the suite spawns `node` (harness scenarios, `node --check`,
-`node -e`); a child that never writes to stdout and never exits produces a run
-with no output and no end. So the required job carries an explicit bound:
+JavaScript syntax checks and desktop behavioural harnesses spawn `node`; the
+deployment-helper tests use real `gjs`, with a guarded Quadlet generator check.
+Other assertions run directly in Python. A stuck child can still stall the suite,
+so the required job carries an explicit bound:
 
 ```yaml
 jobs:

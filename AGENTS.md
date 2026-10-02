@@ -46,6 +46,8 @@ bluefin-bling/
 │       ├── metadata.json
 │       ├── extension.js
 │       ├── toggle.js
+│       ├── service.js         # Standalone GJS deployment helper
+│       ├── syncthing.container.in  # Runtime Quadlet template
 │       ├── prefs.js
 │       ├── icons/
 │       └── schemas/
@@ -143,7 +145,7 @@ new extension is covered without editing any list:
 python3 -m unittest discover -s tests -t tests -v
 ```
 
-Standard library only — no dependencies to install. It enforces `metadata.json`
+Python standard library only — no Python packages to install. It enforces `metadata.json`
 invariants (uuid ↔ folder name, shell-version, settings-schema), GSettings schema
 correctness (id ↔ metadata, path convention, no unknown or dead keys), `node --check`
 on every JS source, `disable()` teardown hygiene, and that every CSS class a source
@@ -152,9 +154,12 @@ extension — Shell reads `stylesheet.css` and its variant siblings from the ext
 root only, and loads exactly one of them. See
 [`docs/skills/extension-validation.md`](docs/skills/extension-validation.md).
 
-`node` must be present: `node --check` and the behavioural harnesses that execute
-the real sources under stubbed GJS skip themselves when it is missing, so a run
-without node is a weaker green than it looks.
+External tools determine coverage: missing `node` skips syntax checks and Node
+harnesses; missing `gjs` skips the real deployment-helper tests. The Quadlet
+generator check and packaged-native-unit scenario have additional guards. CI
+installs Node and the schema compiler, but does not install GJS or the generator.
+Inspect skips rather than treating every green run as equivalent; see the exact
+prerequisites in [`docs/skills/extension-validation.md`](docs/skills/extension-validation.md).
 
 `.github/workflows/ci.yml` runs this same suite on every pull request and on
 every push to `main`. Run it locally first anyway. Also compile the schemas the

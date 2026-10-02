@@ -13,7 +13,8 @@ dependencies: [gnome-shell-extension-dev, quick-settings-integration]
 tags: [syncthing, containers, quadlet, xdg, gjs]
 description: >-
   Use when changing Sync Folder container setup, authenticated REST requests,
-  XDG folder defaults, native-service migration, or sharing persistence.
+  XDG folder defaults, native-service migration, sharing persistence, or pending
+  invitation notifications.
 metadata:
   type: reference
   context7-sources:
@@ -43,6 +44,8 @@ The template runs the official pinned image as the user's UID/GID with `UserNS=k
 
 State lives under `$XDG_STATE_HOME/syncthing` (normally `~/.local/state/syncthing`). Preserve its certificate, key, config and database; the daemon creates identity itself for a fresh installation. The helper writes private `container.env` and `desktop.json`; state is `0700`, managed files `0600`. `STGUIAPIKEY` is an OS-random key retained across setup calls. Read it asynchronously and send `X-API-Key`; never put it in command argv, logs, or screenshots. Use `Soup.Session({proxy_resolver: null})` so loopback credentials do not follow a system proxy.
 
+The helper runs with the same UID as GNOME Shell, without elevation. It checks configuration/state ancestors for symlinks and unsafe writable modes, requires current-user ownership for private state and the Quadlet directory, and accepts managed files only as current-user-owned, singly linked regular files. Existing Quadlets must carry the management marker; existing desktop metadata and credential files must satisfy their managed formats. Refuse unrelated or unsafe targets rather than overwriting them. These checks and private permissions do not isolate credentials from other processes running as the same user or from root.
+
 API authentication does not replace GUI username/password authentication on a multi-user computer. The web UI exposes that choice separately. See [REST authentication](https://docs.syncthing.net/dev/rest.html) and [Soup proxy behavior](https://github.com/GNOME/libsoup/blob/master/libsoup/soup-session.c).
 
 `SecurityLabelDisable=true` is a deliberate, human-approved tradeoff for this rootless container: existing desktop SELinux labels remain unchanged, but container SELinux confinement is disabled. DAC, user namespace and restricted mounts remain. Do not silently replace this with recursive `:Z` relabeling of user directories.
@@ -65,6 +68,10 @@ Persist captured migration mounts separately from explicit extra mounts. Preserv
 
 New persistence comes from Quadlet's `[Install] WantedBy=default.target`, followed by `daemon-reload`; generated services cannot be enabled with `systemctl enable`. Automatic metered pause does not erase the user's persistent on intent. Start/Stop only leaves login intent unchanged. See [Quadlet enable semantics](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html).
 
+## Pending invitations
+
+Read `cluster/pending/devices` and `cluster/pending/folders` through the authenticated API. Device offers are keyed by device ID; folder offers by **folder ID and offering device ID**, so a second peer offering the same folder is new. Replace announcement memory only after both responses are valid and the request is still current. Transport, HTTP and JSON failures preserve it; a successful empty response removes resolved offers, allowing a later re-offer to notify again. Overlapping polls share one in-flight read. This memory is per indicator instance, not durable sharing approval: notifications only direct the user to Sharing Settings and never accept a device or folder.
+
 ## Red Flags
 
 - Editing daemon XML while it runs: its next save can overwrite external edits. Use its live API.
@@ -78,9 +85,18 @@ New persistence comes from Quadlet's `[Install] WantedBy=default.target`, follow
 
 ```bash
 python3 -m unittest discover -s tests -t tests -v
+# Real helper dependencies and guarded coverage: see extension-validation.md
+python3 -m unittest discover -s tests -t tests -v -p 'test_syncthing_service_behavior.py'
+# Re-derive private-file ownership and request/credential handling from shipped sources
+grep -nE 'function (directory|ownedFile|writePrivate|apiKey|prepare)|STGUIADDRESS=|Refusing to overwrite' extensions/syncthing-toggle/service.js
+grep -nE 'proxy_resolver|X-API-Key|cluster/pending|offeredBy|_announcedPending' extensions/syncthing-toggle/toggle.js
 systemctl --user show syncthing.service -p FragmentPath -p SourcePath -p ActiveState
 podman ps --filter name=systemd-syncthing --format '{{.Names}} {{.Image}} {{.Status}}'
 gnome-extensions info syncthing-toggle@projectbluefin.io
 ```
+
+Read [`extension validation`](extension-validation.md) for GJS, XDG utility,
+generator and packaged-native-unit prerequisites and skip behavior. Node harness
+or generator success is not proof of the desktop surface or real peer sync.
 
 For runtime proof, create a disposable folder on each approved peer, grant sharing only to those test folders through the authenticated API, write distinct fixtures on every node, and compare SHA-256 hashes. Stop one node through the real control, prove an active peer receives a new fixture while the stopped node does not, then resume and prove convergence. Recreate a container and verify identity and user-edited folder choices survive. Remove test definitions, mounts and files afterwards; retain real peer approvals only when the user requested them.

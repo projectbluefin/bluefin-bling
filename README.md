@@ -26,6 +26,8 @@ bluefin-bling/
 │       ├── metadata.json
 │       ├── extension.js
 │       ├── toggle.js
+│       ├── service.js         # Standalone GJS deployment helper
+│       ├── syncthing.container.in  # Runtime Quadlet template
 │       ├── prefs.js
 │       ├── icons/
 │       └── schemas/

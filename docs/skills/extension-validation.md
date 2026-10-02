@@ -21,6 +21,7 @@ metadata:
   context7-sources:
     - /git_gitlab_gnome_org/gnome_gnome-shell
     - /websites/gjs-docs_gnome
+    - /websites/podman_io_en
 ---
 
 # Extension Validation
@@ -39,11 +40,32 @@ metadata:
 python3 -m unittest discover -s tests -t tests -v
 ```
 
-Standard library only — no `pip install`, no `package.json`. `node` is required
-for the parts of the suite that execute JavaScript: `node --check` on every
-source, and the behavioural harnesses below. All of them **skip silently when
-`node` is absent**, so a green local run on a machine without node has proven
-far less than it looks — CI installs node for this reason.
+The Python runner uses only the standard library — no `pip install`, no
+`package.json`. Coverage depends on external executables:
+
+- `node`: `node --check`, desktop behavioural harnesses and JavaScript unit-name
+  validation skip their guarded tests when Node is absent. Static Python checks
+  still run.
+- `gjs`: the whole `SyncthingServiceBehavior` class in
+  `tests/test_syncthing_service_behavior.py` skips when real GJS is absent. The
+  helper uses Gio/GLib, not the desktop harness stubs or Soup. Its normal setup
+  calls `/usr/bin/realpath`, `/usr/bin/id`, `/usr/bin/xdg-user-dir`,
+  `/usr/bin/timeout` and `/usr/bin/systemctl`; these are not individually guarded
+  by dependency skips.
+- The helper's generator scenario also requires `podman-system-generator` on
+  `PATH`, `/usr/lib/systemd/system-generators/podman-system-generator`, or
+  `/usr/libexec/podman/quadlet` (the first existing file wins). If none exists,
+  only that scenario skips; it runs the generator with `--user --dryrun`, not a
+  container start.
+- The stopped-native scenario requires a user manager reporting an inactive or
+  failed, loaded packaged `syncthing.service` with no drop-ins at a recognized
+  system-unit path; otherwise that scenario skips. It observes the unit without
+  installing or starting it.
+
+Inspect the verbose run's skip reasons. CI explicitly installs Node and the
+schema compiler, but not GJS, XDG utilities or the Quadlet generator; a Node-only
+CI run does not exercise the real-GJS helper. A green result with dependency
+skips is weaker evidence, not proof of the omitted paths.
 
 Pull requests and pushes to `main` are validated automatically by CI
 (`.github/workflows/ci.yml`). Run the suite above locally before opening a PR,
@@ -158,14 +180,15 @@ any file a new extension added was silently never checked.
   declared set and excuse a rule that is genuinely missing
 
 `tests/test_syncthing_toggle.py`
-- the only security-regression test in the repo. Verifies `_validatedServiceName()`
-  accepts valid systemd unit names and rejects malformed ones and command-injection
-  payloads. `SECURITY.md` depends on the invariant it guards — do not weaken it
-  without updating that file too
+- verifies `_validatedServiceName()` accepts valid systemd unit names and rejects
+  malformed names and command-injection payloads. Its call-site checks run in
+  Python; its regex cases require Node. This is one security regression guard,
+  not the complete security coverage. `SECURITY.md` depends on the invariant it
+  guards — do not weaken it without updating that file too.
 
 ## Behavioural harnesses
 
-The checks above read source text. A harness instead *runs* the shipped source:
+Node harnesses *run* the shipped desktop source under platform stubs:
 `tests/syncthing_toggle_harness.mjs`, `tests/syncthing_prefs_harness.mjs`,
 `tests/syncthing_extension_harness.mjs`, `tests/light_style_harness.mjs` and
 `tests/power_status_color_harness.mjs` read the real `.js` file, rewrite **only**
@@ -186,6 +209,13 @@ launched URIs, indicator visibility, subtitle text — so the tests assert what 
 user or the system would see, never source text. Adding a scenario means adding
 one entry to the `scenarios` object plus the assertions for it.
 
+`tests/test_syncthing_toggle_behavior.py` covers authenticated API health and
+readiness, local-only folder defaults despite inherited peers, native migration
+and rollback ownership, preserved user edits/deleted presets, cancellation and
+newest-request precedence, metered pause and login intent, and pending invitation
+identity/failure recovery. These are controller-level scenarios with stubbed
+Soup, subprocesses and files; they do not prove a real container or peer sync.
+
 Two rules keep these honest:
 
 - **One harness per module.** A second harness over the same source splits the
@@ -196,6 +226,31 @@ Two rules keep these honest:
   checked by breaking the extension on purpose — deleting the reconcile call at
   `enable()`, hoisting the notification above the `systemctl` result — and
   confirming the suite went red.
+
+## Real GJS deployment-helper coverage
+
+`tests/test_syncthing_service_behavior.py` executes the shipped `service.js` with
+`gjs -m` in temporary homes, isolating `HOME`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME`,
+`XDG_DATA_HOME` and `XDG_CACHE_HOME`. It checks localized/quoted paths, absent or
+home-alias XDG directories, persistent credentials and untouched engine identity,
+private modes, provisioning/restart acknowledgement, captured migration mounts,
+and autostart import/off behavior. Rejection cases cover unrelated Quadlets,
+unsafe symlink ancestors, symlink/hardlink credential targets, and uninspectable
+pre-existing daemon state without writing managed credentials or definitions.
+
+The guarded real-generator scenario decodes generated systemd argv and checks
+same-UID/GID `keep-id`, host networking, selected mounts without a whole-home
+mount, the private environment-file reference, SELinux label-disable choice,
+API-key non-disclosure and `[Install]` autostart semantics. This is helper and
+generator proof, not a GNOME Shell, Podman container or multi-peer integration
+test. Follow [`Syncthing container integration`](syncthing-container-integration.md)
+for runtime verification and security decisions.
+
+XDG isolation does not mock the user service manager: the helper still performs
+real `systemctl --user` queries. If it detects a running native Syncthing process,
+folder inspection additionally invokes `/usr/bin/podman` with the template's
+pinned image and a read-only state mount. Podman/image availability is not a
+dependency skip guard. The suite itself does not start or install a native unit.
 
 ## Extending the suite
 
@@ -238,6 +293,13 @@ grep -n "continue" tests/test_extension_metadata.py
 # What does CI actually run, and on which events?
 python3 -c "import yaml; d=yaml.safe_load(open('.github/workflows/ci.yml')); print(list(d[True].keys()))"
 grep -n "run:" .github/workflows/ci.yml
+
+# Helper dependencies, skip guards, filesystem isolation and generator invocation
+grep -nE 'GJS =|GENERATOR =|podman-system-generator|/usr/libexec/podman/quadlet|skipUnless|skipTest|/usr/bin/|XDG_|--dryrun' tests/test_syncthing_service_behavior.py
+command -v node gjs xdg-user-dir
+
+# Controller regression scenarios, including migration and invitation recovery
+grep -n '^    def test_' tests/test_syncthing_toggle_behavior.py
 
 # Current test count, to notice silent loss of coverage
 python3 -m unittest discover -s tests -t tests 2>&1 | tail -3
