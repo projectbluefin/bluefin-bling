@@ -68,6 +68,14 @@ export default class IndicatorExtension extends Extension {
 }
 ```
 
+For a menu-only toggle, leave the `SystemIndicator` without icon children:
+`_addIndicator()` is optional. `addExternalIndicator()` registers
+`quickSettingsItems` independently of the panel actor's visibility. Sync Folder
+uses this pattern so its menu control remains available without an extra panel icon.
+See [upstream registration](https://gitlab.gnome.org/GNOME/gnome-shell/-/blob/main/js/ui/panel.js)
+and [SystemIndicator](https://gitlab.gnome.org/GNOME/gnome-shell/-/blob/main/js/ui/quickSettings.js).
+
+
 ---
 
 ## Desktop Notifications & HIG Voice

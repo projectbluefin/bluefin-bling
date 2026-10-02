@@ -1,0 +1,31 @@
+# Managed by bluefin-bling syncthing-toggle; do not replace with an unrelated unit.
+[Unit]
+Description=Sync Folder (Syncthing container)
+
+[Container]
+Image=ghcr.io/syncthing/syncthing:2.1.5
+Network=host
+HostName=@HOSTNAME@
+UserNS=keep-id
+User=@UID@
+Group=@GID@
+EnvironmentFile=@ENVFILE@
+Environment=HOME=/var/syncthing
+Environment=STHOMEDIR=/var/syncthing/config
+Environment=STNOUPGRADE=1
+Environment=UMASK=0077
+Volume=@STATEVOLUME@
+@FOLDERVOLUMES@
+# Shared desktop directories retain their existing SELinux labels.
+SecurityLabelDisable=true
+NoNewPrivileges=true
+DropCapability=all
+HealthCmd=none
+StopTimeout=30
+
+[Service]
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=900
+TimeoutStopSec=60
+@INSTALL@

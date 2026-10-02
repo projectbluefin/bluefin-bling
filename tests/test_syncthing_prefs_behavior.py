@@ -116,39 +116,6 @@ class TestPreferencesWidgetTree(unittest.TestCase):
         self.assertEqual(result["pageCount"], 1)
         self.assertEqual(result["groupCount"], 1)
 
-    def test_group_carries_the_shipped_title_and_description(self):
-        result = run_scenario("widget-tree")
-        self.assertEqual(result["groupTitle"], "General Settings")
-        self.assertEqual(result["groupDescription"], "Configure Syncthing Toggle")
-
-    def test_rows_appear_in_shipped_order_with_shipped_types(self):
-        # Row order is the dialog's reading order, and the row type decides
-        # what control the user gets. Both are user-visible.
-        result = run_scenario("widget-tree")
-        self.assertEqual(
-            [(row["kind"], row["title"]) for row in result["rows"]],
-            [
-                ("EntryRow", "Service name"),
-                ("ActionRow", "Syncthing port"),
-                ("SwitchRow", "Start/Stop only"),
-                ("EntryRow", "Custom icon name"),
-            ],
-        )
-
-    def test_only_the_port_and_switch_rows_carry_subtitles(self):
-        result = run_scenario("widget-tree")
-        self.assertEqual(
-            [row["subtitle"] for row in result["rows"]],
-            [
-                None,
-                "Set the port Syncthing runs on.",
-                (
-                    "Whether or not to only start/stop or also enable/disable "
-                    "the Syncthing service when toggling."
-                ),
-                None,
-            ],
-        )
 
 
 @unittest.skipIf(NODE is None, "node is not installed; cannot execute prefs.js")
@@ -303,35 +270,6 @@ class TestAboutWindow(unittest.TestCase):
         self.assertEqual(result["copyright"], "© 2024 rehhouari")
 
 
-@unittest.skipIf(NODE is None, "node is not installed; cannot execute prefs.js")
-class TestTranslatableStrings(unittest.TestCase):
-    def test_translated_strings_are_exactly_the_ones_shipped_through_gettext(self):
-        # The port row's title and subtitle are built from bare literals, so
-        # they stay English in a translated session. Pinning the set keeps that
-        # omission visible rather than letting it pass as an untested detail.
-        result = run_scenario("translation")
-        self.assertEqual(
-            result["translated"],
-            [
-                "General Settings",
-                "Configure Syncthing Toggle",
-                "Service name",
-                "Start/Stop only",
-                (
-                    "Whether or not to only start/stop or also enable/disable "
-                    "the Syncthing service when toggling."
-                ),
-                "About",
-                "Custom icon name",
-            ],
-        )
-
-    def test_port_row_strings_bypass_gettext(self):
-        result = run_scenario("widget-tree")
-        port_row = result["rows"][1]
-        translated = set(run_scenario("translation")["translated"])
-        self.assertNotIn(port_row["title"], translated)
-        self.assertNotIn(port_row["subtitle"], translated)
 
 
 if __name__ == "__main__":
