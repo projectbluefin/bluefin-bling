@@ -23,6 +23,7 @@ Agent entry point for `projectbluefin/bluefin-bling`. Load only the skill(s) tha
 | Work with Quick Settings toggles, indicators, or desktop notifications | [`skills/quick-settings-integration.md`](skills/quick-settings-integration.md) |
 | Inspect or integrate with pure `bootc` image status or system updates | [`skills/gnome-shell-extension-dev.md`](skills/gnome-shell-extension-dev.md) |
 | Work with GSettings schemas or preferences UI | [`skills/gnome-shell-extension-dev.md`](skills/gnome-shell-extension-dev.md) |
+| Configure Sync Folder containers, REST integration, XDG presets, or native migration | [`skills/syncthing-container-integration.md`](skills/syncthing-container-integration.md) |
 | **Quality & Lifecycle Hygiene** | |
 | Validate an extension or add a test | [`skills/extension-validation.md`](skills/extension-validation.md) |
 | Debug asynchronous I/O, `Gio.Subprocess`, `Gio.FileMonitor`, or cancellables | [`skills/gnome-shell-extension-dev.md`](skills/gnome-shell-extension-dev.md) |

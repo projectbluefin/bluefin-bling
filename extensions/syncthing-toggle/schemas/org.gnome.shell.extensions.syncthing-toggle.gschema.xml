@@ -4,8 +4,8 @@
 		path="/org/gnome/shell/extensions/syncthing-toggle/">
 		<key name="start-stop-only" type="b">
 			<default>false</default>
-			<summary>Whether or not the toggle should only start/stop or also enable/disable</summary>
-			<description>Set to true to only start or stop the service, not enable and disable.</description>
+			<summary>Change sharing without changing login startup</summary>
+			<description>Set to true to start or stop the container without changing its login startup preference.</description>
 		</key>
 		<key name="service-name" type="s">
 			<default>'syncthing.service'</default>
@@ -15,8 +15,8 @@
 		<key name="port" type="i">
 			<range min="1" max="65535" />
 			<default>8384</default>
-			<summary>The port Syncthing is configured to run on</summary>
-			<description>Set the port Syncthing runs on.</description>
+			<summary>Sharing web interface and API port</summary>
+			<description>The loopback port used by the container web interface and API.</description>
 		</key>
 		<key name="icon-name" type="s">
 			<default>''</default>

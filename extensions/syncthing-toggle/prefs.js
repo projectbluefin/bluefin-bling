@@ -49,8 +49,8 @@ export default class SyncthingToggleExtensionPreferences extends ExtensionPrefer
 		//#region port
 
 		const portRow = new Adw.ActionRow({
-			title: 'Syncthing port',
-			subtitle: 'Set the port Syncthing runs on.',
+			title: _('Web interface port'),
+			subtitle: _('Set the port used by the sharing settings and API.'),
 		})
 
 		let port = this._window._settings.get_int('port')
@@ -85,7 +85,7 @@ export default class SyncthingToggleExtensionPreferences extends ExtensionPrefer
 		const startStopOnlySwitch = new Adw.SwitchRow({
 			title: _('Start/Stop only'),
 			subtitle: _(
-				'Whether or not to only start/stop or also enable/disable the Syncthing service when toggling.'
+				'Only change sharing for this session; leave the login startup preference unchanged.'
 			),
 		})
 

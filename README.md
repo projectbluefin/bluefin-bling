@@ -28,6 +28,8 @@ bluefin-bling/
 │       ├── metadata.json
 │       ├── extension.js
 │       ├── toggle.js
+│       ├── service.js         # Standalone GJS deployment helper
+│       ├── syncthing.container.in  # Runtime Quadlet template
 │       ├── prefs.js
 │       ├── icons/
 │       └── schemas/
@@ -73,17 +75,27 @@ Visually alters the Quick Settings power button color to indicate system reboot 
 **UUID:** `syncthing-toggle@projectbluefin.io`  
 **Compatibility:** GNOME Shell 45, 46, 47, 48, 49, 50, 51+
 
-A Quick Settings toggle for Bluefin's built-in Sync Folder peer sharing service. This is just a quadlet that runs the headless official syncthing container:
+A single Quick Settings toggle controls a rootless Quadlet running the official
+Syncthing container. No separate panel icon or companion desktop app is needed.
 
-> EZ
->
-> -- John Bazzite
+- **Documents by default:** The actual XDG Documents directory is configured locally. Other available XDG folders appear paused in Sharing Settings for opt-in.
+- **XDG-only fresh setup:** Only existing XDG presets are offered; no custom `~/Sync` folder is created. Existing folders are retained during migration.
+- **Explicit sharing:** Pair devices and approve folders in Syncthing's existing web UI. Enabling the service or unpausing a folder does not grant a peer access to Documents.
+- **Supported configuration:** The extension uses authenticated asynchronous REST requests, not daemon XML rewrites or a host Syncthing binary.
+- **Preserved settings:** Native-service migration keeps identity, database, existing folders and peer approvals. Later toggles preserve user edits and deleted presets.
+- **Metered networks:** Sharing pauses without erasing the user's login startup choice; a newer off request prevents automatic resume.
+- **Simple controls:** Sharing Settings opens the built-in web UI; Start/Stop only leaves login startup unchanged.
 
-- **Quick Toggle:** Turn peer file sharing on or off with a single click.
-- **Desktop Notifications:** GNOME HIG-aligned notifications keep you informed without jargon:
-  - **Enabled:** *"Sync Folder Sharing Enabled — Your files are sharing with your other devices."*
-  - **Disabled:** *"Sync Folder Sharing Disabled — File sharing is paused."*
-- **Submenu Actions:** Quick link to open the Syncthing Web GUI directly in the default browser.
+Requires `podman`, `gjs` with Soup 3, and the desktop's `xdg-user-dirs` configuration. The first on request prepares
+the private configuration and user Quadlet. Install the whole extension directory,
+including its helper and container template. After replacing an already-loaded
+extension version on Wayland, save work and log out/in to load the new code.
+
+The rootless container mounts only selected folders. It deliberately disables
+container SELinux labeling rather than relabeling user files; user namespaces,
+same-UID execution, dropped capabilities and no-new-privileges remain in place.
+See [container integration](docs/skills/syncthing-container-integration.md) for the
+security tradeoff, migration details, and verification workflow.
 
 ### 3. `light-style` (Light Style Follower)
 
@@ -184,6 +196,7 @@ This repository follows standard Project Bluefin practices:
   - [`pr-review-and-merge.md`](docs/skills/pr-review-and-merge.md)
   - [`quick-settings-integration.md`](docs/skills/quick-settings-integration.md)
   - [`skill-improvement.md`](docs/skills/skill-improvement.md)
+  - [`syncthing-container-integration.md`](docs/skills/syncthing-container-integration.md)
 
 This catalog and [`docs/SKILL.md`](docs/SKILL.md) are both checked against
 `docs/skills/` by `tests/test_docs_inventory.py`: every skill doc must appear in

@@ -19,10 +19,10 @@ shape-only: ``test_extension_sources.py`` greps for an ``enable()``/``disable()`
 pair, it does not run them.
 
 This module closes that gap the same way every other gate here closes one: by
-discovering both sides. For every JS source under ``extensions/``, some
-``tests/*_harness.mjs`` must resolve that path (``harness_covers_source()``),
-and some ``tests/test_*.py`` must spawn that harness through node
-(``harness_is_exercised()``).
+discovering both sides. Every JS source under ``extensions/`` must be resolved
+by a ``tests/*_harness.mjs`` that a Python test launches through Node, or be
+directly launched through GJS by a Python behavior test. Interpreter and script
+must be connected in the same subprocess argv, not merely mentioned.
 
 A deliberate exception belongs in ``UNCOVERED_SOURCES`` below — a shrinking
 ratchet, not a permanent allowlist. ``TestRatchetIsAccurate`` fails if an entry
@@ -42,6 +42,7 @@ from extension_manifest import (
     harness_files,
     harness_is_exercised,
     js_sources,
+    source_is_directly_exercised,
     test_modules,
 )
 
@@ -53,7 +54,7 @@ from extension_manifest import (
 INFRASTRUCTURE_HARNESSES = frozenset({"gnome_module_loader_harness.mjs"})
 
 # Deliberate, reviewable exceptions to the coverage gate below. Empty today —
-# every shipped source has a harness. An entry here must name the source
+# every shipped source is exercised. An entry here must name the source
 # relative to the repo root and explain why it is not yet covered; when
 # coverage lands, remove the entry in the same PR (TestRatchetIsAccurate fails
 # otherwise, so a stale entry cannot survive a review that only reads the
@@ -84,23 +85,24 @@ class TestEveryExtensionSourceIsExecuted(unittest.TestCase):
             "discriminates covered from uncovered until a second one does",
         )
 
-    def test_every_source_is_covered_by_a_harness(self):
+    def test_every_source_has_an_execution_path(self):
         harnesses = [h for h in harness_files() if h.name not in INFRASTRUCTURE_HARNESSES]
         harness_texts = {h: h.read_text(encoding="utf-8") for h in harnesses}
+        test_texts = {str(p): p.read_text(encoding="utf-8") for p in test_modules()}
         for source in _all_sources():
             rel = _repo_relative(source)
             if rel in UNCOVERED_SOURCES:
                 continue
             with self.subTest(source=rel):
                 covering = [
-                    h for h, text in harness_texts.items() if harness_covers_source(text, source)
+                    h for h, text in harness_texts.items()
+                    if harness_covers_source(text, source) and harness_is_exercised(h, test_texts)
                 ]
                 self.assertTrue(
-                    covering,
-                    f"{rel} is shipped but no tests/*_harness.mjs resolves its path — "
-                    "it is validated for shape only and zero lines of it ever execute. "
-                    "Add a behavior harness, or add this path to UNCOVERED_SOURCES with "
-                    "a stated reason.",
+                    covering or source_is_directly_exercised(source, test_texts),
+                    f"{rel} is shipped but neither an exercised Node harness nor a "
+                    "direct GJS subprocess launches it. Add behavioral execution "
+                    "coverage, or add this path to UNCOVERED_SOURCES with a stated reason.",
                 )
 
     def test_every_covering_harness_is_actually_spawned(self):
@@ -145,6 +147,7 @@ class TestRatchetIsAccurate(unittest.TestCase):
     def test_every_entry_is_genuinely_uncovered(self):
         harnesses = [h for h in harness_files() if h.name not in INFRASTRUCTURE_HARNESSES]
         harness_texts = {h: h.read_text(encoding="utf-8") for h in harnesses}
+        test_texts = {str(p): p.read_text(encoding="utf-8") for p in test_modules()}
         by_rel = {_repo_relative(source): source for source in _all_sources()}
         for entry in UNCOVERED_SOURCES:
             source = by_rel.get(entry)
@@ -152,13 +155,13 @@ class TestRatchetIsAccurate(unittest.TestCase):
                 continue  # already reported by test_every_entry_names_a_real_source
             with self.subTest(entry=entry):
                 covering = [
-                    h for h, text in harness_texts.items() if harness_covers_source(text, source)
+                    h for h, text in harness_texts.items()
+                    if harness_covers_source(text, source) and harness_is_exercised(h, test_texts)
                 ]
                 self.assertFalse(
-                    covering,
-                    f"UNCOVERED_SOURCES lists {entry!r}, but "
-                    f"{[h.name for h in covering]} already covers it — remove the "
-                    "stale exception",
+                    covering or source_is_directly_exercised(source, test_texts),
+                    f"UNCOVERED_SOURCES lists {entry!r}, but an exercised Node harness "
+                    "or direct GJS launch already covers it — remove the stale exception",
                 )
 
 
@@ -195,7 +198,9 @@ class TestHelpers(unittest.TestCase):
         harness = Path("light_style_harness.mjs")
         spawns_it = {
             "test_light_style.py": (
+                'import shutil, subprocess\nfrom pathlib import Path\n'
                 'HARNESS = Path(__file__).resolve().parent / "light_style_harness.mjs"\n'
+                'NODE = shutil.which("node")\n'
                 "subprocess.run([NODE, str(HARNESS)])\n"
             )
         }
@@ -204,9 +209,54 @@ class TestHelpers(unittest.TestCase):
     def test_harness_is_exercised_rejects_bare_mention(self):
         harness = Path("light_style_harness.mjs")
         just_mentions_it = {
-            "README.md": "See tests/light_style_harness.mjs for the rewrite.\n"
+            "test_behavior.py": "# See tests/light_style_harness.mjs for the rewrite.\n"
         }
         self.assertFalse(harness_is_exercised(harness, just_mentions_it))
+
+    def test_interpreter_launch_requires_the_right_runtime_and_script(self):
+        source = REPO_ROOT / "extensions" / "syncthing-toggle" / "service.js"
+        harness = Path("light_style_harness.mjs")
+        setup = (
+            'import shutil, subprocess\nfrom pathlib import Path\n'
+            'ROOT = Path(__file__).resolve().parent.parent\n'
+            'HELPER = ROOT / "extensions" / "syncthing-toggle" / "service.js"\n'
+            'HARNESS = Path(__file__).with_name("light_style_harness.mjs")\n'
+            'GJS = shutil.which("gjs")\nNODE = shutil.which("node")\n'
+        )
+        cases = (
+            # Both names and both runtimes exist; only actual argv counts.
+            ("pass", False, False),
+            ('subprocess.run([NODE, str(HELPER)])', False, False),
+            ('subprocess.run([GJS, "-m", str(HARNESS)])', False, False),
+            ('subprocess.run([GJS, "-m", str(HELPER)])', True, False),
+            ('subprocess.run([NODE, str(HARNESS)])', False, True),
+            ('argv = [GJS, "-m", str(HELPER)]\nsubprocess.run(argv)', True, False),
+            ('argv = [NODE, str(HARNESS)]\nsubprocess.run(args=argv)', False, True),
+            ('subprocess.run([GJS, "-m", str(HELPER)], shell=True)', False, False),
+            ('subprocess.run([GJS, "-m", str(HELPER)], executable="/usr/bin/true")', False, False),
+            ('subprocess.run([GJS, "-m", str(HELPER)], **options)', False, False),
+            ('argv = [GJS, "-m", str(HELPER)]\nargv[0] = "/usr/bin/true"\nsubprocess.run(argv)', False, False),
+            ('argv = [GJS, "-m", str(HELPER)]\nalias = argv\nalias[0] = "/usr/bin/true"\nsubprocess.run(argv)', False, False),
+            ('argv = [GJS, "-m", str(HELPER)]\nargv.insert(0, "/usr/bin/true")\nsubprocess.run(argv)', False, False),
+            ('argv = [NODE, str(HARNESS)]\nargv.append("options")\nsubprocess.run(argv)', False, True),
+            ('print([GJS, "-m", str(HELPER)])', False, False),
+        )
+        for launch, direct, node in cases:
+            with self.subTest(launch=launch):
+                tests = {"test_behavior.py": setup + launch + "\n"}
+                self.assertEqual(source_is_directly_exercised(source, tests), direct)
+                self.assertEqual(harness_is_exercised(harness, tests), node)
+
+    def test_direct_execution_rejects_a_different_shipped_source(self):
+        source = REPO_ROOT / "extensions" / "syncthing-toggle" / "service.js"
+        tests = {"test_behavior.py": (
+            'import shutil, subprocess\nfrom pathlib import Path\n'
+            'GJS = shutil.which("gjs")\n'
+            'HELPER = Path(__file__).resolve().parent.parent / "extensions" / '
+            '"syncthing-toggle" / "toggle.js"\n'
+            'subprocess.run([GJS, "-m", str(HELPER)])\n'
+        )}
+        self.assertFalse(source_is_directly_exercised(source, tests))
 
 
 if __name__ == "__main__":

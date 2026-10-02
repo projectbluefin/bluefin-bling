@@ -176,9 +176,15 @@ extension with no hardcoded list.
           try { source.set_attributes_finish(res) } catch (e) { /* ... */ }
       })
   ```
-  Treat the failure as non-fatal — a home on a filesystem with no unix modes
-  must not lose the feature — but log it. `extensions/syncthing-toggle`'s
-  `_ensureSyncFolderConfig()` is the worked example.
+  Keep secret-bearing directories private before daemon startup. The Syncthing
+  deployment helper does this in a separate child process; its synchronous I/O
+  never runs inside Shell. See [container integration](./syncthing-container-integration.md).
+- **Writing live daemon configuration on disk.** Syncthing keeps its configuration
+  in memory and can overwrite external XML edits on its next save. Its supported
+  REST configuration endpoints apply and persist changes through the daemon.
+- **Guessing local device identity from defaults or XML order.** Syncthing folder
+  templates can contain peers. Obtain `myID` from `/rest/system/status` and give
+  a new folder only that local device until the user approves peer sharing.
 - **`logError('message', err)`.** The GJS signature is
   `logError(error, prefix)` — error first. Swapped arguments lose the stack trace.
 - **Interpolating a settings value into a command line.** Settings are

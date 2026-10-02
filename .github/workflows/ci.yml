@@ -29,10 +29,9 @@ jobs:
   extension-validation:
     name: validate extensions (tests, node --check, glib-compile-schemas)
     runs-on: ubuntu-latest
-    # The whole suite runs in well under a minute; every assertion spawns node,
-    # so a harness that never exits would otherwise hold the required
-    # `validate extensions` context — and the merge queue entry waiting on it —
-    # for GitHub's 360-minute default.
+    # Bound all subprocess-based behavioral checks so a hung runtime cannot
+    # hold the required `validate extensions` context — and its merge queue
+    # entry — for GitHub's 360-minute default.
     timeout-minutes: 15
     permissions:
       contents: read
@@ -47,14 +46,21 @@ jobs:
         with:
           node-version: "24"
 
-      # glib-compile-schemas ships in libglib2.0-bin, not the base image.
-      - name: Install glib-compile-schemas
+      # Exercise both Node desktop harnesses and the standalone real-GJS helper.
+      # Ubuntu's Podman package supplies the real Quadlet generator; dry-run
+      # generation does not start containers or require an active user manager.
+      - name: Install validation runtimes
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libglib2.0-bin
+          sudo apt-get install -y --no-install-recommends libglib2.0-bin gjs xdg-user-dirs podman coreutils systemd
+          for tool in realpath id sh timeout systemctl; do
+            test -x "/usr/bin/$tool"
+          done
+          # Fail rather than silently skip the helper or generator scenarios.
+          python3 -c 'import sys; sys.path.insert(0, "tests"); import test_syncthing_service_behavior as t; assert t.GJS, "GJS missing"; assert t.GENERATOR, "Quadlet generator missing"'
 
-      # stdlib unittest only — no dependencies. Covers metadata.json, GSettings
-      # schema/source cross-checks, ESM-only sources, and teardown hygiene.
+      # stdlib unittest runner — no Python dependencies. Includes real-GJS helper
+      # behavior alongside metadata, schemas, ESM sources and teardown hygiene.
       - name: Run validation suite
         run: python3 -m unittest discover -s tests -t tests -v
 
