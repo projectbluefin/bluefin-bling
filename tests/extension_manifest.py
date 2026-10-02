@@ -7,6 +7,7 @@ editing a list.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import xml.etree.ElementTree as ET
@@ -276,13 +277,9 @@ def css_class_names(stylesheet_source: str) -> set[str]:
     return {m.group("name") for m in _CSS_CLASS_RE.finditer(selectors)}
 
 
-# Executed-coverage discovery. Every structural gate above derives its subject
-# from extension_dirs()/js_sources(); which of those sources are ever actually
-# *run* was, until this, a hand-maintained pairing between a harness and a
-# behavior test module named nowhere else. These helpers make that mapping
-# discovered too: a harness "covers" a source if it names that source's path
-# in a join()-style path build, and a harness is "exercised" if some
-# tests/test_*.py spawns it through node.
+# Executed-coverage discovery joins shipped paths to Node harnesses or direct
+# GJS launches. Python AST analysis ties the resolved interpreter and script to
+# the same subprocess argv; comments and unused path constants prove nothing.
 
 
 def harness_files() -> list[Path]:
@@ -322,17 +319,148 @@ def harness_covers_source(harness_source: str, source: Path) -> bool:
     return False
 
 
-def harness_is_exercised(harness: Path, test_sources: dict[str, str]) -> bool:
-    """Does some test module spawn *harness* through node?
+def _python_launches(text: str, test_file: Path) -> list[tuple[str, Path]]:
+    """Resolve the narrow subprocess/path conventions used by behavior tests.
 
-    Mirrors the convention every ``test_*_behavior.py`` / ``test_*.py`` module
-    already follows: a module-level ``HARNESS = Path(...) / "<name>"``
-    assignment naming the file, paired with a ``subprocess`` invocation of
-    ``NODE``. Both conditions are required so a module that merely mentions the
-    filename in a comment or docstring does not count.
+    This never imports or executes tests. Unsupported expressions fail closed;
+    runtime names alone are not evidence of an interpreter invocation.
     """
-    name = re.escape(harness.name)
-    for text in test_sources.values():
-        if re.search(rf"[\"']{name}[\"']", text) and "subprocess" in text and "NODE" in text:
+    tree = ast.parse(text, filename=str(test_file))
+    launches: list[tuple[str, Path]] = []
+
+    def value(node, bindings):
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.Name):
+            return bindings.get(node.id)
+        if isinstance(node, (ast.List, ast.Tuple)):
+            return [value(item, bindings) for item in node.elts]
+        if isinstance(node, ast.Attribute):
+            owner = value(node.value, bindings)
+            if isinstance(owner, Path) and node.attr == "parent":
+                return owner.parent
+            if isinstance(owner, tuple) and owner[0] == "import":
+                return ("import", f"{owner[1]}.{node.attr}")
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            left, right = value(node.left, bindings), value(node.right, bindings)
+            if isinstance(left, Path) and isinstance(right, str):
+                return left / right
+        if isinstance(node, ast.Call):
+            args = [value(arg, bindings) for arg in node.args]
+            function = value(node.func, bindings)
+            if function == ("import", "shutil.which") and len(args) == 1:
+                return ("runtime", args[0])
+            if function == ("import", "pathlib.Path") and len(args) == 1:
+                if isinstance(args[0], (str, Path)):
+                    return Path(args[0])
+            if isinstance(node.func, ast.Name) and node.func.id == "str" and len(args) == 1:
+                if isinstance(args[0], Path):
+                    return str(args[0])
+            if isinstance(node.func, ast.Attribute):
+                owner = value(node.func.value, bindings)
+                if isinstance(owner, Path):
+                    if node.func.attr == "resolve" and not args:
+                        return owner.resolve()
+                    if node.func.attr == "with_name" and len(args) == 1 and isinstance(args[0], str):
+                        return owner.with_name(args[0])
+        return None
+
+    def visit(statements, inherited):
+        bindings = inherited.copy()
+        for statement in statements:
+            if isinstance(statement, ast.Import):
+                for alias in statement.names:
+                    bindings[alias.asname or alias.name] = ("import", alias.name)
+            elif isinstance(statement, ast.ImportFrom):
+                for alias in statement.names:
+                    bindings[alias.asname or alias.name] = ("import", f"{statement.module}.{alias.name}")
+            elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                local = bindings.copy()
+                if not isinstance(statement, ast.ClassDef):
+                    for argument in (*statement.args.posonlyargs, *statement.args.args,
+                                     *statement.args.kwonlyargs):
+                        local[argument.arg] = None
+                visit(statement.body, local)
+                continue
+
+            # Inspect this statement's expressions, not nested scope/branch bodies.
+            pending = [statement]
+            while pending:
+                node = pending.pop()
+                if isinstance(node, ast.Call) and value(node.func, bindings) in (
+                    ("import", "subprocess.run"), ("import", "subprocess.Popen"),
+                    ("import", "subprocess.check_call"), ("import", "subprocess.check_output"),
+                ):
+                    argv_node = node.args[0] if node.args else next(
+                        (kw.value for kw in node.keywords if kw.arg == "args"), None)
+                    argv = value(argv_node, bindings)
+                    shell = next((kw.value for kw in node.keywords if kw.arg == "shell"), None)
+                    if isinstance(argv, list) and len(argv) >= 2 and (
+                        shell is None or value(shell, bindings) is False
+                    ) and all(kw.arg not in (None, "executable") for kw in node.keywords):
+                        runtime = argv[0]
+                        if isinstance(runtime, tuple) and runtime[0] == "runtime":
+                            runtime = runtime[1]
+                        script_index = 2 if runtime == "gjs" and argv[1] == "-m" else 1
+                        if runtime in ("node", "gjs") and len(argv) > script_index:
+                            script = argv[script_index]
+                            if isinstance(script, (str, Path)):
+                                script = Path(script)
+                                if script.is_absolute():
+                                    launches.append((runtime, script.resolve()))
+                elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                    owner = value(node.func.value, bindings)
+                    if isinstance(owner, list) and node.func.attr not in ("append", "extend"):
+                        # Clear the shared value, so aliases cannot retain stale argv proof.
+                        owner.clear()
+                pending.extend(child for child in ast.iter_child_nodes(node)
+                               if not isinstance(child, ast.stmt))
+
+            if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                assigned = value(statement.value, bindings)
+                targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        bindings[target.id] = assigned
+                    elif isinstance(target, ast.Subscript):
+                        owner = value(target.value, bindings)
+                        if isinstance(owner, list):
+                            owner.clear()
+            elif isinstance(statement, (ast.AugAssign, ast.Delete)):
+                targets = [statement.target] if isinstance(statement, ast.AugAssign) else statement.targets
+                for target in targets:
+                    owner = value(target.value if isinstance(target, ast.Subscript) else target, bindings)
+                    if isinstance(owner, list):
+                        owner.clear()
+            for field in ("body", "orelse", "finalbody"):
+                body = getattr(statement, field, None)
+                if isinstance(body, list):
+                    visit(body, bindings)
+            if isinstance(statement, ast.Try):
+                for handler in statement.handlers:
+                    visit(handler.body, bindings)
+
+    visit(tree.body, {"__file__": str(test_file.resolve())})
+    return launches
+
+
+def _is_launched(runtime: str, script: Path, test_sources: dict[str, str]) -> bool:
+    for filename, text in test_sources.items():
+        test_file = Path(filename)
+        if not test_file.is_absolute():
+            test_file = TESTS_DIR / test_file.name
+        if (runtime, script.resolve()) in _python_launches(text, test_file):
             return True
     return False
+
+
+def harness_is_exercised(harness: Path, test_sources: dict[str, str]) -> bool:
+    """Does a test launch this exact harness as Node's script argument?"""
+    if not harness.is_absolute():
+        harness = TESTS_DIR / harness.name
+    return _is_launched("node", harness, test_sources)
+
+
+def source_is_directly_exercised(source: Path, test_sources: dict[str, str]) -> bool:
+    """Does a test launch this exact shipped source through real GJS?"""
+    return _is_launched("gjs", source, test_sources)

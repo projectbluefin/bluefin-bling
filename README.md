@@ -79,6 +79,7 @@ A single Quick Settings toggle controls a rootless Quadlet running the official
 Syncthing container. No separate panel icon or companion desktop app is needed.
 
 - **Documents by default:** The actual XDG Documents directory is configured locally. Other available XDG folders appear paused in Sharing Settings for opt-in.
+- **XDG-only fresh setup:** Only existing XDG presets are offered; no custom `~/Sync` folder is created. Existing folders are retained during migration.
 - **Explicit sharing:** Pair devices and approve folders in Syncthing's existing web UI. Enabling the service or unpausing a folder does not grant a peer access to Documents.
 - **Supported configuration:** The extension uses authenticated asynchronous REST requests, not daemon XML rewrites or a host Syncthing binary.
 - **Preserved settings:** Native-service migration keeps identity, database, existing folders and peer approvals. Later toggles preserve user edits and deleted presets.

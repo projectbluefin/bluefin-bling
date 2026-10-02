@@ -62,10 +62,12 @@ The Python runner uses only the standard library — no `pip install`, no
   system-unit path; otherwise that scenario skips. It observes the unit without
   installing or starting it.
 
-Inspect the verbose run's skip reasons. CI explicitly installs Node and the
-schema compiler, but not GJS, XDG utilities or the Quadlet generator; a Node-only
-CI run does not exercise the real-GJS helper. A green result with dependency
-skips is weaker evidence, not proof of the omitted paths.
+Inspect the verbose run's skip reasons locally. CI installs Node, GJS, XDG
+utilities, Podman (including the Quadlet generator), the helper's absolute-path
+tools and the schema compiler. A prerequisite check fails CI instead of letting
+the real-GJS helper or generator scenarios silently skip. The packaged-native
+scenario remains guarded by the host's actual unit state; a green result with
+local dependency skips is not proof of the omitted paths.
 
 Pull requests and pushes to `main` are validated automatically by CI
 (`.github/workflows/ci.yml`). Run the suite above locally before opening a PR,
@@ -190,19 +192,25 @@ any file a new extension added was silently never checked.
 - the discovery side of the behavioural harnesses below: every gate above is
   shape-only (a `disable()` with the right teardown keywords in its body is not
   proof it runs correctly), so this asserts that every `.js` under `extensions/`
-  is actually *executed* by something. For each `js_sources(ext_dir)` entry, some
-  `tests/*_harness.mjs` must resolve that exact path
-  (`extension_manifest.harness_covers_source()`), and some `tests/test_*.py` must
-  spawn that harness through node (`extension_manifest.harness_is_exercised()`) —
-  a harness nothing runs proves nothing
+  is actually *executed* by something. For each `js_sources(ext_dir)` entry, an
+  exercised `tests/*_harness.mjs` must resolve that exact path
+  (`extension_manifest.harness_covers_source()`), or a Python behavior test must
+  launch the source directly through GJS (`source_is_directly_exercised()`).
+  Python AST discovery ties the interpreter (including `shutil.which()`) and
+  resolved script path to the same `subprocess` argv; bare mentions, unrelated
+  script arguments, executable overrides, unknown keyword expansion, and the
+  wrong runtime do not count. Prefix-changing argv mutations invalidate proof,
+  including aliases; appending options preserves the interpreter/script prefix.
+  Node harnesses must be launched through Node (`harness_is_exercised()`) — an
+  unused harness proves nothing
 - `tests/gnome_module_loader_harness.mjs` is the one exempt harness: it exercises
   the shared import-rewrite shim directly against synthetic sources, not a
   shipped `extensions/` path, so it can never "cover" one
 - deliberate gaps belong in `UNCOVERED_SOURCES`, a shrinking ratchet keyed to a
   repo-relative path. It is empty today. `TestRatchetIsAccurate` fails an entry
   that is stale in either direction — already covered, or no longer a real file —
-  so remove the entry in the same PR that adds the harness rather than leaving it
-  behind
+  so remove the entry in the same PR that adds an executed harness or direct GJS
+  behavior test rather than leaving it behind
 
 ## Behavioural harnesses
 

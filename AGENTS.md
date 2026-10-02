@@ -160,9 +160,10 @@ root only, and loads exactly one of them. See
 External tools determine coverage: missing `node` skips syntax checks and Node
 harnesses; missing `gjs` skips the real deployment-helper tests. The Quadlet
 generator check and packaged-native-unit scenario have additional guards. CI
-installs Node and the schema compiler, but does not install GJS or the generator.
-Inspect skips rather than treating every green run as equivalent; see the exact
-prerequisites in [`docs/skills/extension-validation.md`](docs/skills/extension-validation.md).
+installs Node, GJS, XDG utilities, Podman (including the Quadlet generator), and
+the schema compiler, and fails if helper/generator prerequisites are missing.
+The packaged-native-unit scenario remains environment-dependent. Inspect local
+skips; see prerequisites in [`docs/skills/extension-validation.md`](docs/skills/extension-validation.md).
 
 `.github/workflows/ci.yml` runs this same suite on every pull request and on
 every push to `main`. Run it locally first anyway. Also compile the schemas the
