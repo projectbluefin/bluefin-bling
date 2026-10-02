@@ -11,7 +11,9 @@ This monorepo maintains extensions and visual integrations tailored for Bluefin 
 ```
 bluefin-bling/
 ├── .github/
-│   └── workflows/ci.yml       # Runs the validation suite on every PR and on main
+│   └── workflows/
+│       ├── ci.yml                          # Runs the validation suite on every PR and on main
+│       └── gnomeos-boot-feasibility.yml     # Manual feasibility probe for GNOME OS channels
 ├── extensions/
 │   ├── light-style/           # Follows the desktop color-scheme into GNOME Shell's light theme
 │   │   ├── metadata.json
@@ -34,6 +36,7 @@ bluefin-bling/
 ├── docs/
 │   ├── SKILL.md               # Task → skill router
 │   └── skills/                # Authoritative operational knowledge
+├── scripts/                  # CI and compatibility matrix orchestration
 ├── tests/                     # Discovery-based validation suite (stdlib unittest)
 ├── AGENTS.md
 ├── README.md
@@ -52,7 +55,7 @@ new top-level entry fails CI until it is named here.
 ### 1. `power-status-color` (Quick Settings Power Status Alert)
 
 **UUID:** `power-status-color@projectbluefin.io`  
-**Compatibility:** GNOME Shell 45, 46, 47, 48, 49, 50+
+**Compatibility:** GNOME Shell 45, 46, 47, 48, 49, 50, 51+
 
 Visually alters the Quick Settings power button color to indicate system reboot and maintenance state:
 
@@ -70,7 +73,7 @@ Visually alters the Quick Settings power button color to indicate system reboot 
 ### 2. `syncthing-toggle` (Sync Folder Peer Sharing Toggle)
 
 **UUID:** `syncthing-toggle@projectbluefin.io`  
-**Compatibility:** GNOME Shell 45, 46, 47, 48, 49, 50+
+**Compatibility:** GNOME Shell 45, 46, 47, 48, 49, 50, 51+
 
 A single Quick Settings toggle controls a rootless Quadlet running the official
 Syncthing container. No separate panel icon or companion desktop app is needed.
@@ -97,7 +100,7 @@ security tradeoff, migration details, and verification workflow.
 
 **UUID:** `light-style@projectbluefin.io`  
 **Display name:** Bluefin Light Style — deliberately distinct from the upstream `light-style@gnome-shell-extensions.gcampax.github.com` extension, which presents as plain "Light Style".  
-**Compatibility:** GNOME Shell 45, 46, 47, 48, 49, 50+
+**Compatibility:** GNOME Shell 45, 46, 47, 48, 49, 50, 51+
 
 Makes GNOME Shell itself follow the desktop light/dark preference, rather than
 repainting the Shell from the extension:

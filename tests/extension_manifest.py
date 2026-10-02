@@ -14,6 +14,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EXTENSIONS_DIR = REPO_ROOT / "extensions"
+TESTS_DIR = Path(__file__).resolve().parent
 
 UUID_DOMAIN = "projectbluefin.io"
 REPO_URL = "https://github.com/projectbluefin/bluefin-bling"
@@ -273,3 +274,65 @@ def css_class_names(stylesheet_source: str) -> set[str]:
     # Only selector text can name a class; a declaration block holds values.
     selectors = _CSS_DECLARATION_BLOCK_RE.sub(" ", selectors)
     return {m.group("name") for m in _CSS_CLASS_RE.finditer(selectors)}
+
+
+# Executed-coverage discovery. Every structural gate above derives its subject
+# from extension_dirs()/js_sources(); which of those sources are ever actually
+# *run* was, until this, a hand-maintained pairing between a harness and a
+# behavior test module named nowhere else. These helpers make that mapping
+# discovered too: a harness "covers" a source if it names that source's path
+# in a join()-style path build, and a harness is "exercised" if some
+# tests/test_*.py spawns it through node.
+
+
+def harness_files() -> list[Path]:
+    """Return every behavior harness under tests/, sorted by name."""
+    return sorted(TESTS_DIR.glob("*_harness.mjs"))
+
+
+def test_modules() -> list[Path]:
+    """Return every test module under tests/, sorted by name."""
+    return sorted(TESTS_DIR.glob("test_*.py"))
+
+
+def _quoted_literals(text: str) -> list[str]:
+    """Return every single- or double-quoted string literal in *text*, in order."""
+    return [m.group(2) for m in re.finditer(r"(['\"])((?:(?!\1).)*)\1", text)]
+
+
+def harness_covers_source(harness_source: str, source: Path) -> bool:
+    """Does *harness_source* build a path pointing at ``source``?
+
+    Every existing harness names its target with a sequence of quoted path
+    segments passed to ``join()`` — e.g. ``join(HERE, '..', 'extensions',
+    'light-style', 'extension.js')``. Rather than parsing ``join()`` calls
+    specifically (a harness could format the path differently), this checks
+    for the literal segments of ``source``'s path relative to the repo root
+    appearing as consecutive quoted-string literals, in order, anywhere in the
+    harness. That is loose enough to survive incidental formatting changes and
+    strict enough that a harness naming an unrelated file does not match.
+    """
+    wanted = source.resolve().relative_to(REPO_ROOT).parts
+    literals = _quoted_literals(harness_source)
+    if len(wanted) > len(literals):
+        return False
+    for start in range(len(literals) - len(wanted) + 1):
+        if tuple(literals[start:start + len(wanted)]) == wanted:
+            return True
+    return False
+
+
+def harness_is_exercised(harness: Path, test_sources: dict[str, str]) -> bool:
+    """Does some test module spawn *harness* through node?
+
+    Mirrors the convention every ``test_*_behavior.py`` / ``test_*.py`` module
+    already follows: a module-level ``HARNESS = Path(...) / "<name>"``
+    assignment naming the file, paired with a ``subprocess`` invocation of
+    ``NODE``. Both conditions are required so a module that merely mentions the
+    filename in a comment or docstring does not count.
+    """
+    name = re.escape(harness.name)
+    for text in test_sources.values():
+        if re.search(rf"[\"']{name}[\"']", text) and "subprocess" in text and "NODE" in text:
+            return True
+    return False

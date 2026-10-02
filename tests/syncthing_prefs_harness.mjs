@@ -18,53 +18,16 @@
 // Usage: node syncthing_prefs_harness.mjs <scenario> ['<json options>']
 // Prints a single JSON object describing the observed result.
 
-import {readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {dirname, join} from 'node:path';
+
+import {loadGnomeModule} from './gnome_module_loader.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PREFS_JS = join(HERE, '..', 'extensions', 'syncthing-toggle', 'prefs.js');
 
-const IMPORT_LINE_RE =
-    /^\s*import\s+(?:(\*\s+as\s+\w+)|(\{[^}]*\})|(\w+))\s+from\s+['"](?:gi:\/\/|resource:\/\/\/)[^'"]+['"];?\s*$/gm;
-// prefs.js writes its named import across several lines, so the single-line
-// form above cannot see it. Matching the multi-line shape separately keeps the
-// rewrite honest instead of loosening the single-line pattern for everyone.
-const MULTILINE_NAMED_IMPORT_RE =
-    /^import\s+(\{[^}]*\})\s+from\s+['"](?:gi:\/\/|resource:\/\/\/)[^'"]+['"];?\s*$/gms;
-
-function rewriteGnomeImports(source) {
-    const bindNamed = named =>
-        // `{ gettext as _ }` is import syntax; destructuring needs `{ gettext: _ }`.
-        `const ${named.replace(/\s+as\s+/g, ': ')} = globalThis.__stStubs;`;
-
-    return source
-        .replace(MULTILINE_NAMED_IMPORT_RE, (line, named) =>
-            line.includes('\n') ? bindNamed(named) : line,
-        )
-        .replace(IMPORT_LINE_RE, (_line, namespaceImport, namedImport, defaultImport) => {
-            if (namespaceImport) {
-                const name = namespaceImport.split(/\s+as\s+/)[1];
-                return `const ${name} = globalThis.__stStubs.${name};`;
-            }
-            if (namedImport)
-                return bindNamed(namedImport);
-            return `const ${defaultImport} = globalThis.__stStubs.${defaultImport};`;
-        });
-}
-
-function asDataModule(source) {
-    return `data:text/javascript;base64,${Buffer.from(source, 'utf8').toString('base64')}`;
-}
-
 function loadPrefsModule() {
-    const source = readFileSync(PREFS_JS, 'utf8');
-    const rewritten = rewriteGnomeImports(source);
-    if (/^\s*import\s/m.test(rewritten))
-        throw new Error('an import survived the rewrite — harness rewrite is stale');
-    if (rewritten === source)
-        throw new Error('no gi:// or resource:/// imports found — harness rewrite is stale');
-    return import(asDataModule(rewritten));
+    return loadGnomeModule({path: PREFS_JS, stubsExpression: 'globalThis.__stStubs'});
 }
 
 // --- Stubs ------------------------------------------------------------------
