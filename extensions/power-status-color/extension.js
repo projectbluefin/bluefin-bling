@@ -12,6 +12,8 @@ const CLASS_REBOOT = 'power-status-reboot';
 const REBOOT_FLAG_FILES = [
     '/run/reboot-required',
     '/var/run/reboot-required',
+    '/run/composefs/staged-deployment',
+    '/run/ostree/staged-deployment',
 ];
 
 function loadFileAsync(file, cancellable) {
@@ -24,6 +26,20 @@ function loadFileAsync(file, cancellable) {
                 resolve(null);
             }
         });
+    });
+}
+
+function fileExistsAsync(file, cancellable) {
+    return new Promise((resolve) => {
+        file.query_info_async('standard::type', Gio.FileQueryInfoFlags.NONE,
+            GLib.PRIORITY_DEFAULT, cancellable, (f, res) => {
+                try {
+                    f.query_info_finish(res);
+                    resolve(true);
+                } catch {
+                    resolve(false);
+                }
+            });
     });
 }
 
@@ -75,21 +91,17 @@ export default class PowerStatusColorExtension extends Extension {
         this._checkingStatus = false;
         this._statusQueued = false;
 
-        // 1. Monitor /run directory for reboot-required flags
-        try {
-            const runDir = Gio.File.new_for_path('/run');
-            this._fileMonitor = runDir.monitor_directory(
-                Gio.FileMonitorFlags.NONE,
-                this._cancellable
-            );
-            this._monitorId = this._fileMonitor.connect('changed', (mon, file, otherFile, eventType) => {
-                const basename = file?.get_basename();
-                if (basename === 'reboot-required') {
-                    this._checkStatus();
-                }
-            });
-        } catch (e) {
-            console.error(`[PowerStatusColor] Failed to monitor /run: ${e.message}`);
+        // Watch each marker, including files whose parent does not exist yet.
+        this._fileMonitors = new Map();
+        for (const filePath of REBOOT_FLAG_FILES) {
+            try {
+                const file = Gio.File.new_for_path(filePath);
+                const monitor = file.monitor_file(Gio.FileMonitorFlags.NONE, this._cancellable);
+                const id = monitor.connect('changed', () => this._checkStatus());
+                this._fileMonitors.set(monitor, id);
+            } catch (e) {
+                console.error(`[PowerStatusColor] Failed to monitor ${filePath}: ${e.message}`);
+            }
         }
 
         // 2. Periodic poll every 5 minutes
@@ -117,13 +129,13 @@ export default class PowerStatusColorExtension extends Extension {
             this._timeoutId = null;
         }
 
-        if (this._fileMonitor) {
-            if (this._monitorId) {
-                this._fileMonitor.disconnect(this._monitorId);
-                this._monitorId = null;
+        if (this._fileMonitors) {
+            for (const [monitor, id] of this._fileMonitors) {
+                monitor.disconnect(id);
+                monitor.cancel();
             }
-            this._fileMonitor.cancel();
-            this._fileMonitor = null;
+            this._fileMonitors.clear();
+            this._fileMonitors = null;
         }
 
         if (this._cancellable) {
@@ -224,19 +236,19 @@ export default class PowerStatusColorExtension extends Extension {
     }
 
     async _checkRebootPending() {
-        // 1. Check flag files
+        // Markers are readable by Shell even when bootc status requires root.
+        const cancellable = this._cancellable;
         for (const filePath of REBOOT_FLAG_FILES) {
-            try {
-                if (Gio.File.new_for_path(filePath).query_exists(null))
-                    return true;
-            } catch {
-                // Ignore query error
-            }
+            const exists = await fileExistsAsync(Gio.File.new_for_path(filePath), cancellable);
+            if (cancellable?.is_cancelled())
+                return false;
+            if (exists)
+                return true;
         }
 
         // 2. Pure bootc staged deployment check (bootc documentation convention)
         try {
-            const stdout = await runCommandAsync(['bootc', 'status', '--format=json'], this._cancellable);
+            const stdout = await runCommandAsync(['bootc', 'status', '--format=json'], cancellable);
             if (stdout) {
                 const data = JSON.parse(stdout);
                 // In bootc schema, status.staged is non-null when an update is queued for next boot

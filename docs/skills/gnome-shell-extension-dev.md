@@ -1,7 +1,7 @@
 ---
 name: gnome-shell-extension-dev
-version: "1.2"
-last_updated: "2026-09-18"
+version: "1.3"
+last_updated: "2026-10-02"
 id: gnome-shell-extension-dev
 one_line_purpose: Development, architecture, and lifecycle rules for modern GNOME Shell extensions.
 entry_point: docs/skills/gnome-shell-extension-dev.md
@@ -123,11 +123,17 @@ function runCommandAsync(argv, cancellable) {
 Bluefin is an image-based OS powered by `bootc`. Extensions interact with system state following bootc conventions:
 
 1. **Detecting Staged Updates:**
-   - Run `bootc status --format=json` (or read `/run/reboot-required`).
-   - Parse `status.staged`: if non-null, an update is queued for next boot.
+   - Query `/run/composefs/staged-deployment` (composefs-native bootc) and `/run/ostree/staged-deployment` (OSTree) as well as `/run/reboot-required` and its `/var/run` alias. A staged update need not create `reboot-required`.
+   - Use `Gio.File.query_info_async()` / `query_info_finish()` for existence checks; `query_exists(null)` blocks the compositor.
+   - Retain `bootc status --format=json` as a fallback where permitted; `status.staged != null` is the existing staged-update criterion. This does not distinguish download-only deployments from those unlocked for finalization.
 2. **Permissions:**
-   - On current bootc releases, `bootc status` calls `prepare_for_write()`, which checks for root privilege. Handle permission denials gracefully and fall back to file flags (`/run/reboot-required`).
-   - Do not invoke interactive `pkexec` dialogs on automated background polling loops.
+   - Some bootc releases require root even for `status`. The Shell must use the readable markers, not elevated subprocesses or interactive `pkexec` dialogs.
+3. **Monitoring and teardown:**
+   - Use `monitor_file()` for each marker, not a non-recursive `/run` directory watch: native markers live in subdirectories. Creation, atomic replacement and deletion must re-check status.
+   - GIO's local Linux backend can watch a missing file or parent; keep the five-minute poll as fallback for unavailable monitors/backends. Retain every successful monitor and its signal id, and synchronously disconnect/cancel all of them in `disable()`.
+   - Capture the probe's cancellable before awaiting file queries; cancellation must prevent a stale query from launching a bootc subprocess after a disable/enable cycle.
+
+Marker semantics: [bootc composefs staged state](https://github.com/bootc-dev/bootc/blob/main/crates/lib/src/bootc_composefs/status.rs). Monitoring API: [GIO monitor_file](https://docs.gtk.org/gio/method.File.monitor_file.html).
 
 ---
 
@@ -206,6 +212,12 @@ python3 -c "import json,glob; [print(f, json.load(open(f))['shell-version']) for
 
 # Teardown hygiene is machine-checked; see which rules exist
 grep -n "def test_" tests/test_extension_sources.py
+
+# Exercise staged-marker detection, transitions, cancellation and teardown
+python3 -m unittest discover -s tests -t tests -p test_power_status_color.py -v
+
+# Re-derive the marker list and monitor ownership from the implementation
+grep -nE 'staged-deployment|_fileMonitors|monitor_file|query_info_async' extensions/power-status-color/extension.js
 
 # Confirm an API against upstream rather than memory
 #   Context7: /git_gitlab_gnome_org/gnome_gnome-shell, /websites/gjs-docs_gnome

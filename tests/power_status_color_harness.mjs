@@ -122,25 +122,35 @@ function makeStubs(options) {
         subprocessArgv: null,
     };
 
-    let monitorChangedCallback = null;
-    const fileMonitor = {
-        connect(signal, cb) {
-            if (signal === 'changed')
-                monitorChangedCallback = cb;
-            return 77;
-        },
-        disconnect() {
-            log.monitorDisconnected = true;
-            monitorChangedCallback = null;
-        },
-        cancel() {
-            log.monitorCancelled = true;
-        },
-    };
+    const monitors = [];
+    function makeMonitor(path) {
+        if (options.monitorThrows || options.failedMonitorPaths?.includes(path))
+            throw new Error('monitor failed');
+        const monitor = {
+            path,
+            callback: null,
+            cancelled: false,
+            connect(_signal, cb) {
+                this.callback = cb;
+                return 77;
+            },
+            disconnect() {
+                this.callback = null;
+                log.monitorDisconnected = monitors.every(m => m.callback === null);
+            },
+            cancel() {
+                this.cancelled = true;
+                log.monitorCancelled = monitors.every(m => m.cancelled);
+            },
+        };
+        monitors.push(monitor);
+        return monitor;
+    }
 
     const Gio = {
         SubprocessFlags: {STDOUT_PIPE: 1, STDERR_SILENCE: 2},
         FileMonitorFlags: {NONE: 0},
+        FileQueryInfoFlags: {NONE: 0},
         Cancellable: class Cancellable {
             constructor() {
                 this._handlers = [];
@@ -155,8 +165,14 @@ function makeStubs(options) {
 
             cancel() {
                 log.cancellableCancelled = true;
+                this._cancelled = true;
+            }
+
+            is_cancelled() {
+                return this._cancelled ?? false;
             }
         },
+
         Subprocess: class Subprocess {
             constructor({argv}) {
                 log.subprocessArgv = argv;
@@ -184,10 +200,14 @@ function makeStubs(options) {
             new_for_path(path) {
                 return {
                     get_path: () => path,
-                    query_exists() {
-                        if (options.flagFileThrows)
-                            throw new Error('query failed');
-                        return (options.existingFlagFiles ?? []).includes(path);
+                    query_info_async(_attributes, _flags, _priority, cancellable, cb) {
+                        queueMicrotask(() => cb(this, {cancelled: cancellable?.is_cancelled()}));
+                    },
+                    query_info_finish(res) {
+                        if (res.cancelled || options.flagFileThrows ||
+                            !(options.existingFlagFiles ?? []).includes(path))
+                            throw new Error('file unavailable');
+                        return {};
                     },
                     load_contents_async(_cancellable, cb) {
                         queueMicrotask(() => cb(this, 'result'));
@@ -199,10 +219,8 @@ function makeStubs(options) {
                             return [false, null];
                         return [true, Buffer.from(options.uptimeContent, 'utf8')];
                     },
-                    monitor_directory() {
-                        if (options.monitorThrows)
-                            throw new Error('monitor failed');
-                        return fileMonitor;
+                    monitor_file() {
+                        return makeMonitor(path);
                     },
                 };
             },
@@ -245,10 +263,15 @@ function makeStubs(options) {
         stubs: {Gio, GLib, Main, Extension},
         log,
         button,
-        fireMonitorChange(basename) {
-            monitorChangedCallback?.(fileMonitor, {get_basename: () => basename}, null, 0);
+        monitors,
+        fireMonitorChange(path) {
+            const target = path.startsWith('/') ? path : `/run/${path}`;
+            for (const monitor of monitors) {
+                if (monitor.path === target && !monitor.cancelled)
+                    monitor.callback?.(monitor, {get_path: () => target}, null, 0);
+            }
         },
-        hasMonitorCallback: () => monitorChangedCallback !== null,
+        hasMonitorCallback: () => monitors.some(m => m.callback !== null),
     };
 }
 
@@ -330,7 +353,7 @@ const scenarios = {
                 classes: button.classes(),
                 enabled: ext._enabled,
                 timeoutId: ext._timeoutId,
-                fileMonitor: ext._fileMonitor,
+                fileMonitors: ext._fileMonitors,
                 cancellable: ext._cancellable,
                 styledActors: ext._styledActors,
                 timeoutsRemoved: log.timeoutsRemoved,
@@ -348,6 +371,48 @@ const scenarios = {
                 }
             })(),
         };
+    },
+
+    async markerTransitions(options) {
+        options.existingFlagFiles = [];
+        const {ext, button, fireMonitorChange, log, hasMonitorCallback, monitors} = await buildExtension(options);
+        ext.enable();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const initial = button.classes();
+        const trigger = () => options.usePolling
+            ? log.timeoutsAdded[0].cb()
+            : fireMonitorChange(options.markerPath);
+
+        options.existingFlagFiles = [options.markerPath];
+        trigger();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const created = button.classes();
+        trigger(); // Atomic replacement of a still-present staged marker.
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const replaced = button.classes();
+        options.existingFlagFiles = [];
+        trigger();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const removed = button.classes();
+
+        ext.disable();
+        options.existingFlagFiles = [options.markerPath];
+        trigger();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        return {
+            initial, created, replaced, removed,
+            afterDisable: button.classes(),
+            monitorsReleased: monitors.every(m => m.cancelled && m.callback === null),
+            monitorStillConnected: hasMonitorCallback(),
+        };
+    },
+
+    async cancelDuringFlagProbe(options) {
+        const {ext, log, button} = await buildExtension(options);
+        ext.enable();
+        ext.disable();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        return {classes: button.classes(), subprocessArgv: log.subprocessArgv};
     },
 
     async monitorTrigger(options) {
