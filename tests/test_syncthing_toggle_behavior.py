@@ -394,8 +394,8 @@ class TestSyncthingToggleEnable(unittest.TestCase):
         self.assertEqual(result["notifications"], [])
 
     def test_enable_spawns_nothing_but_systemctl(self):
-        # dakota provisions the syncthing config via /etc/skel; the extension
-        # must not seed folders or run `syncthing generate`.
+        # Enable only reconciles status and metering; the extension
+        # must not seed folders or run `syncthing generate` at enable time.
         result = run_scenario("enable", unitRunning=True, metered=True)
         self.assertEqual(result["programs"], ["systemctl"])
 
@@ -422,6 +422,45 @@ class TestSyncthingToggleEnable(unittest.TestCase):
             result["after"],
             {"checked": False, "subtitle": "Stopped", "indicatorVisible": False},
         )
+
+    def test_pending_invitation_fires_notification_and_does_not_repeat(self):
+        pending_dev = '{"DEVICE-123": {"name": "peer", "address": "127.0.0.1:22000"}}'
+        subsequent_dev = '{"DEVICE-123": {"name": "peer"}, "DEVICE-456": {"name": "peer2"}}'
+        result = run_scenario(
+            "poll-pending",
+            pendingDevicesJson=pending_dev,
+            subsequentDevicesJson=subsequent_dev,
+        )
+        # First tick announces newly appeared pending invitation
+        self.assertEqual(len(result["firstNotifications"]), 1)
+        self.assertEqual(
+            result["firstNotifications"][0]["title"],
+            "Sync Folder Sharing Invitation",
+        )
+        self.assertIn("Web GUI", result["firstNotifications"][0]["body"])
+        # Second tick must not notify again for the same invitation
+        self.assertEqual(result["secondNotifications"], [])
+        # Third tick announces when a fresh device joins
+        self.assertEqual(len(result["thirdNotifications"]), 1)
+
+    def test_transient_capture_failure_does_not_wipe_pending_memory(self):
+        # When CLI capture fails transiently, previous memory is preserved so the next
+        # successful poll does not re-spam still-pending invitations.
+        pending_dev = '{"DEVICE-123": {"name": "peer", "address": "127.0.0.1:22000"}}'
+        result = run_scenario(
+            "poll-pending",
+            failFirstCapture=True,
+            pendingDevicesJson=pending_dev,
+        )
+        self.assertEqual(len(result["firstNotifications"]), 1)
+        self.assertEqual(result["secondNotifications"], [])
+
+    def test_inactive_unit_spawns_no_syncthing_pending_probes(self):
+        # While the unit is inactive, the timer tick must query status only
+        # and never spawn syncthing CLI probes.
+        result = run_scenario("poll-pending", unitRunning=False)
+        self.assertEqual(result["firstNotifications"], [])
+        self.assertEqual(result["syncthingSubprocesses"], 0)
 
 
 @unittest.skipIf(NODE is None, "node is not installed; cannot execute toggle.js")
@@ -763,8 +802,8 @@ class TestSyncthingToggleConfigSeeding(unittest.TestCase):
         )
 
     def test_an_already_configured_state_directory_is_left_alone(self):
-        # The early return on a provisioned config (dakota's /etc/skel) must
-        # not chmod a directory the extension never created.
+        # An already existing state directory must not be chmod-ed
+        # if the directory was not created by the extension.
         result = run_scenario("config-seed", configExists=True)
         self.assertEqual(result["modes"], {})
         self.assertEqual(result["attributeCalls"], [])
@@ -827,11 +866,59 @@ class TestSyncthingToggleConfigSeeding(unittest.TestCase):
         self.assertNotEqual(write["flags"], CREATE_FLAGS_REPLACE_DESTINATION)
         self.assertFalse(write["makeBackup"])
 
-    def test_a_config_already_provisioned_is_never_rewritten(self):
-        # dakota ships one through /etc/skel; the extension must not touch it.
-        result = run_scenario("config-seed", configExists=True)
+    def test_a_config_already_provisioned_with_sync_folder_is_never_rewritten(self):
+        # When a provisioned config already defines the sync folder, it is not touched.
+        config = (
+            '<configuration version="37">\n'
+            '    <device id="LOCAL-DEVICE-ID" name="host" compression="metadata"></device>\n'
+            '    <gui enabled="true" tls="false" debugging="false">\n'
+            '        <address>127.0.0.1:8384</address>\n'
+            '        <apikey>super-secret-api-key</apikey>\n'
+            '    </gui>\n'
+            '    <folder id="sync" label="Sync Folder" path="/home/tester/Sync"></folder>\n'
+            '</configuration>'
+        )
+        result = run_scenario("config-seed", configExists=True, existingConfig=config)
         self.assertEqual(result["writes"], [])
         self.assertEqual(result["generate"], [])
+
+    def test_a_preexisting_config_lacking_sync_folder_is_seeded(self):
+        # A daemon started before the toggle was first clicked has config.xml
+        # but lacks <folder id="sync">. Toggling must seed the folder without
+        # re-running syncthing generate or clobbering an existing GUI address.
+        result = run_scenario("config-seed", configExists=True)
+        self.assertEqual(len(result["writes"]), 1)
+        self.assertEqual(result["generate"], [])
+        written = result["writes"][0]["text"]
+        self.assertIn('<folder id="sync"', written)
+        self.assertIn('path="/home/tester/Sync"', written)
+        self.assertIn('<device id="LOCAL-DEVICE-ID"', written)
+
+    def test_local_device_id_is_preferred_over_alphabetically_earlier_peer(self):
+        # Syncthing XML top-level devices are sorted alphabetically by ID.
+        # When a peer ID sorts before the local ID, the seeded folder must
+        # still select the local device from <defaults><folder><device id="...">.
+        config = (
+            '<configuration version="37">\n'
+            '    <device id="000-PEER-DEVICE-ID" name="peer" compression="metadata"></device>\n'
+            '    <device id="ZZZ-LOCAL-DEVICE-ID" name="host" compression="metadata"></device>\n'
+            '    <gui enabled="true" tls="false" debugging="false">\n'
+            '        <address>127.0.0.1:8384</address>\n'
+            '        <apikey>super-secret-api-key</apikey>\n'
+            '    </gui>\n'
+            '    <defaults>\n'
+            '        <folder id="" label="" path="">\n'
+            '            <device id="ZZZ-LOCAL-DEVICE-ID" introducedBy=""></device>\n'
+            '        </folder>\n'
+            '    </defaults>\n'
+            '</configuration>'
+        )
+        result = run_scenario("config-seed", configExists=True, existingConfig=config)
+        self.assertEqual(len(result["writes"]), 1)
+        written = result["writes"][0]["text"]
+        folder_xml = written[written.index('<folder id="sync"'):]
+        self.assertIn('<device id="ZZZ-LOCAL-DEVICE-ID"', folder_xml)
+        self.assertNotIn('<device id="000-PEER-DEVICE-ID"', folder_xml)
 
     def test_a_failed_generate_writes_nothing_and_is_logged(self):
         result = run_scenario("config-seed", generateFails=True)

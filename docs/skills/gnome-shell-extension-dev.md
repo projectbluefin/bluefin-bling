@@ -179,6 +179,18 @@ extension with no hardcoded list.
   Treat the failure as non-fatal — a home on a filesystem with no unix modes
   must not lose the feature — but log it. `extensions/syncthing-toggle`'s
   `_ensureSyncFolderConfig()` is the worked example.
+- **Assuming pre-existing daemon config contains extension-managed folders.**
+  If a background service (e.g. `syncthing.service`) is enabled or runs before the
+  extension is toggled, its initial configuration file may exist while completely
+  lacking the folders or definitions the desktop UI expects. Never bail entirely
+  just because the config file exists on disk; inspect and ensure the required
+  folder definition is present.
+- **Relying on XML document order for local device identity.**
+  Daemons like Syncthing sort top-level device definitions alphabetically by ID on
+  save rather than placing the local host first. First-match regex on `<device id>`
+  can resolve a peer device instead of the local machine. Read the local device
+  identity from the defaults folder template (`<defaults><folder><device id="...">`)
+  or an authoritative tool before assigning folders.
 - **`logError('message', err)`.** The GJS signature is
   `logError(error, prefix)` — error first. Swapped arguments lose the stack trace.
 - **Interpolating a settings value into a command line.** Settings are

@@ -416,8 +416,8 @@ function makeStubs(options) {
     fs.addDir(homeDir);
     if (options.syncDirExists ?? true)
         fs.addDir(`${homeDir}/Sync`);
-    // Provisioned by default — dakota ships a config through /etc/skel, and
-    // that is the case every pre-existing scenario runs under.
+    // Pre-existing config by default — models a pre-configured or previously
+    // running setup for scenarios testing subsequent toggles.
     if (options.configExists ?? true)
         fs.addFile(configPath, options.existingConfig ?? DEFAULT_GENERATED_CONFIG);
     log.fs = fs;
@@ -470,21 +470,30 @@ function makeStubs(options) {
         };
 
         if (flags === Gio.SubprocessFlags.STDOUT_PIPE) {
-            log.statusSubprocesses += 1;
-            log.statusArgv = argv;
+            const isStatus = argv[0] === 'systemctl';
+            if (isStatus) {
+                log.statusSubprocesses += 1;
+                log.statusArgv = argv;
+            }
             return Object.assign(proc, {
                 communicate_utf8_async(_stdin, cancellable, callback) {
                     record.cancellable = cancellable;
                     const deliver = () => callback(this, 'res');
-                    if (options.deferStatus)
+                    if (isStatus && options.deferStatus)
                         log.pendingStatus.push(deliver);
                     else
                         queueMicrotask(deliver);
                 },
                 communicate_utf8_finish() {
-                    if (record.cancellable?.cancelled || log.statusCancelled)
+                    if (record.cancellable?.cancelled || (isStatus && log.statusCancelled))
                         throw new FakeGioError(IO_ERROR_ENUM.CANCELLED, 'Operation was cancelled');
-                    return [true, statusText(argv), ''];
+                    if (isStatus)
+                        return [true, statusText(argv), ''];
+                    if (argv.includes('pending') && argv.includes('devices'))
+                        return [true, options.pendingDevicesJson ?? '{}', ''];
+                    if (argv.includes('pending') && argv.includes('folders'))
+                        return [true, options.pendingFoldersJson ?? '{}', ''];
+                    return [true, '', ''];
                 },
             });
         }
@@ -906,6 +915,56 @@ const scenarios = {
         const returnValue = source.callback();
         await settle();
         return {before, returnValue, statusSubprocesses: log.statusSubprocesses, after: toggleState(indicator)};
+    },
+
+    // A timer tick while active polls pending devices and folders, and fires a
+    // notification when a new pending invitation appears.
+    async 'poll-pending'(options) {
+        const opts = {
+            ...options,
+            unitRunning: options.unitRunning ?? true,
+        };
+        const {indicator, log} = await buildExtension(opts);
+        const source = pollSource(log);
+        log.notifications.length = 0;
+
+        if (options.failFirstCapture) {
+            // First tick: capture returns null / fails
+            opts.subprocessThrows = true;
+            await source.callback();
+            await settle();
+            opts.subprocessThrows = false;
+        }
+
+        // Trigger tick with current pending payloads
+        opts.pendingDevicesJson = options.pendingDevicesJson ?? '{}';
+        opts.pendingFoldersJson = options.pendingFoldersJson ?? '{}';
+        await source.callback();
+        await settle();
+        const firstNotifications = [...log.notifications];
+
+        // Trigger second tick without changes; should not notify again
+        log.notifications.length = 0;
+        await source.callback();
+        await settle();
+        const secondNotifications = [...log.notifications];
+
+        // Trigger third tick with a new pending device added
+        log.notifications.length = 0;
+        if (options.subsequentDevicesJson) {
+            opts.pendingDevicesJson = options.subsequentDevicesJson;
+            await source.callback();
+            await settle();
+        }
+        const thirdNotifications = [...log.notifications];
+
+        return {
+            firstNotifications,
+            secondNotifications,
+            thirdNotifications,
+            syncthingSubprocesses: log.subprocesses.filter(p => p.argv[0] === 'syncthing').length,
+            errors: log.errors,
+        };
     },
 
     // disable() must leave nothing that can fire against torn-down widgets:

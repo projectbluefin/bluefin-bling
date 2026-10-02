@@ -186,7 +186,7 @@ const ServiceToggle = GObject.registerClass(
 
 			// Add an entry-point for more settings
 			this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem())
-			const settingsItem = this.menu.addAction('Extension Settings', () =>
+			const settingsItem = this.menu.addAction(_('Extension Settings'), () =>
 				extensionObject.openPreferences()
 			)
 
@@ -211,6 +211,7 @@ export var ServiceIndicator = GObject.registerClass(
 			// permission to resume: a network change must never restart sharing the
 			// user turned off by hand.
 			this._pausedForMetered = false
+			this._announcedPending = new Set()
 			// Every subprocess spawned here is tied to this cancellable so that
 			// destroy() can abort in-flight calls instead of letting their
 			// callbacks fire against torn-down widgets.
@@ -253,8 +254,7 @@ export var ServiceIndicator = GObject.registerClass(
 					}
 
 					// Give the daemon a folder to sync before it is asked to
-					// start. No-op once config.xml exists, so a config shipped
-					// through /etc/skel is never touched.
+					// start. Ensures ~/Sync and the sync folder definition exist.
 					await this._ensureSyncFolderConfig()
 					if (this._destroyed)
 						return
@@ -278,7 +278,7 @@ export var ServiceIndicator = GObject.registerClass(
 				() => {
 					if (this._destroyed)
 						return GLib.SOURCE_REMOVE
-					this.checkStatus()
+					this._pollStatusAndPending()
 					return GLib.SOURCE_CONTINUE
 				}
 			)
@@ -382,9 +382,9 @@ export var ServiceIndicator = GObject.registerClass(
 		}
 
 		// Syncthing needs a folder before it has anything to share. This seeds
-		// ~/Sync and an initial config.xml, and returns immediately once a config
-		// exists — a config provisioned through /etc/skel is never rewritten.
-		//
+		// ~/Sync and an initial config.xml if absent. If config.xml already exists
+		// (e.g. syncthing.service was started before the toggle was clicked),
+		// it ensures ~/Sync exists and seeds <folder id="sync"> if missing.
 		// Every call here is asynchronous on purpose: the synchronous GIO forms
 		// run on the Shell main loop and freeze the whole compositor on a
 		// networked or spun-down home directory.
@@ -406,80 +406,103 @@ export var ServiceIndicator = GObject.registerClass(
 				return
 
 			const configFile = Gio.File.new_for_path(`${stateDir}/config.xml`)
-			const alreadyConfigured = await queryExistsAsync(configFile, this._cancellable)
-			if (this._destroyed || alreadyConfigured)
-				return
-
-			try {
-				await makeDirectoryWithParentsAsync(
-					Gio.File.new_for_path(stateDir),
-					this._cancellable
-				)
-			} catch (e) {
-				logError(e, 'Failed to create state directory')
-				return
-			}
+			const configExists = await queryExistsAsync(configFile, this._cancellable)
 			if (this._destroyed)
 				return
 
-			// Before `syncthing generate` runs, not after: the next statement
-			// drops key.pem (the device TLS private key) and config.xml, whose
-			// <apikey> is full control of the local REST API, into this
-			// directory. Not tied to the create path above, so a state dir
-			// that exists but holds no config.xml — a half-finished or
-			// cleared-out seed — is narrowed too. An install that already has
-			// a config.xml returned above and keeps whatever mode it has;
-			// widening there is #69's remaining tail, not this change.
-			//
-			// A filesystem with no unix modes — or a state dir that turned out
-			// to be a symlink — refuses this. Log it and seed anyway: the
-			// secrets themselves are still written 0600, and an unusable Sync
-			// Folder toggle is the worse outcome.
-			try {
-				await setUnixModeAsync(
-					Gio.File.new_for_path(stateDir),
-					0o700,
-					this._cancellable
+			if (!configExists) {
+				try {
+					await makeDirectoryWithParentsAsync(
+						Gio.File.new_for_path(stateDir),
+						this._cancellable
+					)
+				} catch (e) {
+					logError(e, 'Failed to create state directory')
+					return
+				}
+				if (this._destroyed)
+					return
+
+				// Before `syncthing generate` runs, not after: the next statement
+				// drops key.pem (the device TLS private key) and config.xml, whose
+				// <apikey> is full control of the local REST API, into this
+				// directory. Not tied to the create path above, so a state dir
+				// that exists but holds no config.xml — a half-finished or
+				// cleared-out seed — is narrowed too. An install that already has
+				// a config.xml returned above and keeps whatever mode it has;
+				// widening there is #69's remaining tail, not this change.
+				//
+				// A filesystem with no unix modes — or a state dir that turned out
+				// to be a symlink — refuses this. Log it and seed anyway: the
+				// secrets themselves are still written 0600, and an unusable Sync
+				// Folder toggle is the worse outcome.
+				try {
+					await setUnixModeAsync(
+						Gio.File.new_for_path(stateDir),
+						0o700,
+						this._cancellable
+					)
+				} catch (e) {
+					logError(e, 'Failed to restrict state directory permissions')
+				}
+				if (this._destroyed)
+					return
+
+				// Plain 'syncthing': Gio.Subprocess resolves it from PATH inside the
+				// child, where GLib.find_program_in_path() would stat every PATH entry
+				// on the compositor thread.
+				const generated = await this._waitCheck(
+					['syncthing', 'generate', `--home=${stateDir}`, '--no-port-probing'],
+					'syncthing generate'
 				)
-			} catch (e) {
-				logError(e, 'Failed to restrict state directory permissions')
+				if (this._destroyed || !generated)
+					return
+
+				const configWritten = await queryExistsAsync(configFile, this._cancellable)
+				if (this._destroyed || !configWritten)
+					return
 			}
-			if (this._destroyed)
-				return
-
-			// Plain 'syncthing': Gio.Subprocess resolves it from PATH inside the
-			// child, where GLib.find_program_in_path() would stat every PATH entry
-			// on the compositor thread.
-			const generated = await this._waitCheck(
-				['syncthing', 'generate', `--home=${stateDir}`, '--no-port-probing'],
-				'syncthing generate'
-			)
-			if (this._destroyed || !generated)
-				return
-
-			const configWritten = await queryExistsAsync(configFile, this._cancellable)
-			if (this._destroyed || !configWritten)
-				return
 
 			try {
 				let xml = await loadContentsAsync(configFile, this._cancellable)
 				if (this._destroyed)
 					return
 
-				// Bind the GUI to the loopback address the Web GUI item opens.
-				xml = xml.replace(
-					/<address>127\.0\.0\.1:\d+<\/address>/,
-					`<address>127.0.0.1:${port}</address>`
-				)
+				let modified = false
 
-				// Seed the default ~/Sync folder. The <defaults> device template is
-				// deliberately left alone: flipping auto-accept there hands every
-				// device paired later blanket authority to create folders under
-				// $HOME with no prompt, and it outlives the extension in
-				// config.xml. The seeded folder is what the feature actually needs.
+				if (!configExists) {
+					// Bind the GUI to the loopback address the Web GUI item opens.
+					const boundXml = xml.replace(
+						/<address>127\.0\.0\.1:\d+<\/address>/,
+						`<address>127.0.0.1:${port}</address>`
+					)
+					if (boundXml !== xml) {
+						xml = boundXml
+						modified = true
+					}
+				}
+
+				// Local device ID: Syncthing records the local device in
+				// <defaults><folder><device id="..."></folder></defaults>. Top-level
+				// <device> entries are sorted alphabetically by ID and may list peers
+				// before the local host. If <defaults> is present, take the local
+				// device from the folder template; otherwise fall back to the top-level
+				// device list.
+				let myDevId = ''
+				const defaultFolderDevMatch = xml.match(
+					/<defaults>[\s\S]*?<folder\b[^>]*>[\s\S]*?<device\b[^>]*\bid="([^"]+)"[\s\S]*?<\/folder>[\s\S]*?<\/defaults>/
+				)
+				if (defaultFolderDevMatch && defaultFolderDevMatch[1]) {
+					myDevId = defaultFolderDevMatch[1]
+				} else {
+					const xmlWithoutDefaultsOrFolders = xml
+						.replace(/<defaults>[\s\S]*?<\/defaults>/g, '')
+						.replace(/<folder\b[\s\S]*?<\/folder>/g, '')
+					const localDevMatch = xmlWithoutDefaultsOrFolders.match(/<device\b[^>]*\bid="([^"]+)"/)
+					myDevId = localDevMatch ? localDevMatch[1] : ''
+				}
+				// Seed the ~/Sync folder definition if absent.
 				if (!xml.includes('id="sync"')) {
-					const devMatch = xml.match(/<device id="([^"]+)"/)
-					const myDevId = devMatch ? devMatch[1] : ''
 					const folderXml = `    <folder id="sync" label="Sync Folder" path="${escapeXmlAttribute(syncDir)}" type="sendreceive" rescanIntervalS="3600" fsWatcherEnabled="true" fsWatcherDelayS="10" ignorePerms="false" autoNormalize="true">
         <filesystemType>basic</filesystemType>
         <device id="${myDevId}" introducedBy=""></device>
@@ -490,9 +513,11 @@ export var ServiceIndicator = GObject.registerClass(
         <markerName>.stfolder</markerName>
     </folder>\n</configuration>`
 					xml = xml.replace('</configuration>', folderXml)
+					modified = true
 				}
 
-				await replaceContentsAsync(configFile, xml, this._cancellable)
+				if (modified)
+					await replaceContentsAsync(configFile, xml, this._cancellable)
 			} catch (e) {
 				logError(e, 'Failed to configure syncthing config')
 			}
@@ -569,32 +594,19 @@ export var ServiceIndicator = GObject.registerClass(
 				`systemctl ${verb}`
 			)
 		}
-
-		async checkStatus() {
+		async _captureStdout(argv, what) {
 			if (this._destroyed)
-				return
-
-			const serviceName = this._validatedServiceName()
-			if (!serviceName) {
-				this.updateStatus(false)
-				return
-			}
+				return null
 			try {
-				const proc = Gio.Subprocess.new(
-					['systemctl', '--user', 'is-active', serviceName],
-					Gio.SubprocessFlags.STDOUT_PIPE
-				)
-
+				const proc = Gio.Subprocess.new(argv, Gio.SubprocessFlags.STDOUT_PIPE)
 				const cancelHandler = this._terminateOnCancel(proc)
-				let stdout
 				try {
-					stdout = await new Promise((resolve, _reject) => {
+					return await new Promise((resolve, _reject) => {
 						proc.communicate_utf8_async(null, this._cancellable, (proc, res) => {
 							try {
 								let [, out] = proc.communicate_utf8_finish(res)
 								resolve(out)
 							} catch {
-								// Cancelled at destroy, or the call failed outright.
 								resolve(null)
 							}
 						})
@@ -602,13 +614,93 @@ export var ServiceIndicator = GObject.registerClass(
 				} finally {
 					this._releaseCancelHandler(cancelHandler)
 				}
-
-				// is-active prints one word and exits non-zero for anything but
-				// 'active', which communicate_utf8 does not treat as an error.
-				this.updateStatus(stdout?.trim() === activeState)
 			} catch (err) {
+				logError(err, `Err running ${what}`)
+				return null
+			}
+		}
+
+		async checkStatus() {
+			if (this._destroyed)
+				return false
+
+			const serviceName = this._validatedServiceName()
+			if (!serviceName) {
 				this.updateStatus(false)
-				logError(err, 'Err checking status')
+				return false
+			}
+			const stdout = await this._captureStdout(
+				['systemctl', '--user', 'is-active', serviceName],
+				'check status'
+			)
+			// is-active prints one word and exits non-zero for anything but
+			// 'active', which communicate_utf8 does not treat as an error.
+			const isActive = stdout?.trim() === activeState
+			this.updateStatus(isActive)
+			return isActive
+		}
+
+		async _pollStatusAndPending() {
+			const isActive = await this.checkStatus()
+			if (this._destroyed || !isActive)
+				return
+			await this._checkPendingInvitations()
+		}
+
+		async _checkPendingInvitations() {
+			const homeDir = GLib.get_home_dir()
+			const stateDir = `${homeDir}/.local/state/syncthing`
+			const devOut = await this._captureStdout(
+				['syncthing', 'cli', `--home=${stateDir}`, 'show', 'pending', 'devices'],
+				'check pending devices'
+			)
+			const folderOut = await this._captureStdout(
+				['syncthing', 'cli', `--home=${stateDir}`, 'show', 'pending', 'folders'],
+				'check pending folders'
+			)
+			if (this._destroyed)
+				return
+
+			// Transient failure (daemon restarting, CLI unavailable, or call cancelled):
+			// do not wipe _announcedPending, otherwise next success re-spams.
+			if (devOut === null || folderOut === null)
+				return
+
+			let hasNewPending = false
+			const currentPending = new Set()
+
+			const parseKeys = jsonStr => {
+				if (!jsonStr)
+					return []
+				try {
+					const obj = JSON.parse(jsonStr)
+					return obj && typeof obj === 'object' ? Object.keys(obj) : []
+				} catch {
+					return []
+				}
+			}
+
+			for (const devId of parseKeys(devOut)) {
+				const key = `dev:${devId}`
+				currentPending.add(key)
+				if (!this._announcedPending.has(key))
+					hasNewPending = true
+			}
+
+			for (const folderId of parseKeys(folderOut)) {
+				const key = `folder:${folderId}`
+				currentPending.add(key)
+				if (!this._announcedPending.has(key))
+					hasNewPending = true
+			}
+
+			this._announcedPending = currentPending
+
+			if (hasNewPending) {
+				Main.notify(
+					_('Sync Folder Sharing Invitation'),
+					_('New device or folder invitation received. Open Web GUI to review and accept.')
+				)
 			}
 		}
 
@@ -647,7 +739,7 @@ export var ServiceIndicator = GObject.registerClass(
 				this._toggle.disconnect(this._clickedSignalId)
 				this._clickedSignalId = 0
 			}
-
+			this._announcedPending.clear()
 			super.destroy()
 		}
 	}
