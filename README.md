@@ -144,19 +144,22 @@ gnome-extensions info syncthing-toggle@projectbluefin.io
 ### Testing Alert States (`power-status-color`)
 
 #### 1. Reboot Required (Yellow)
-Create a temporary flag file:
+Use an existing real staged deployment or reboot requirement. Inspect it without changing system flags:
 ```bash
-sudo touch /run/reboot-required
+for marker in /run/composefs/staged-deployment /run/ostree/staged-deployment /run/reboot-required /var/run/reboot-required; do
+  test ! -e "$marker" || printf '%s\n' "$marker"
+done
+bootc status --format=json # optional; may require permissions unavailable to Shell
+cat /proc/uptime
 ```
-The power icon turns yellow via its file monitor. On a system with a real staged update, removing this test flag does not clear yellow: the deployment marker still requires a restart.
-
-Remove the test flag:
-```bash
-sudo rm -f /run/reboot-required
-```
+With uptime below 30 days and a real pending restart, open Quick Settings and verify the rendered yellow power icon. If no real restart is pending, use the behavioural harness rather than creating or removing system flags. Follow the authoritative [live reboot-alert QA procedure](docs/skills/quick-settings-integration.md#live-reboot-alert-qa) for installed-build checks, red precedence, and restoration.
 
 #### 2. Uptime Overdue (Red)
-To simulate 30+ days uptime without waiting, temporarily set `UPTIME_THRESHOLD_SECONDS = 60` in `extensions/power-status-color/extension.js`, restart or re-enable the extension, and observe the red icon.
+Run the complete affected test module against unchanged production source:
+```bash
+python3 -m unittest discover -s tests -t tests -v -p 'test_power_status_color.py'
+```
+The boundary is exact: **2,591,999 seconds is not overdue; 2,592,000 seconds is overdue**. The harness proves logic, not rendered UI. Use the linked live QA procedure to capture red precedence and the restored real-input state; keep the production threshold unchanged.
 
 ---
 

@@ -1,7 +1,7 @@
 ---
 name: extension-validation
-version: "1.1"
-last_updated: "2026-09-18"
+version: "1.2"
+last_updated: "2026-10-02"
 id: extension-validation
 one_line_purpose: Validate extensions and extend the discovery-based test suite.
 entry_point: docs/skills/extension-validation.md
@@ -196,6 +196,42 @@ Two rules keep these honest:
   checked by breaking the extension on purpose — deleting the reconcile call at
   `enable()`, hoisting the notification above the `systemctl` result — and
   confirming the suite went red.
+
+### Power-status behaviour and release proof
+
+`tests/test_power_status_color.py` drives the unchanged production module through
+`power_status_color_harness.mjs`. Its consumer-visible contracts include:
+
+- Uptime is not overdue at **2,591,999 seconds**, and is overdue at **2,592,000**.
+  Unreadable, invalid, or failed uptime reads do not trigger red.
+- `/run/reboot-required`, `/var/run/reboot-required`,
+  `/run/composefs/staged-deployment`, and `/run/ostree/staged-deployment` are pending
+  restart markers. Markers short-circuit bootc; otherwise permitted
+  `bootc status --format=json` with non-null `status.staged` supplies yellow.
+- Red overrides yellow; classes are mutually exclusive and mirrored on the
+  button's child. Recovery clears old classes, including on replaced actors.
+- Marker creation/replacement/removal refreshes state. A failed monitor preserves
+  other monitors and the five-minute polling fallback; disable releases monitors,
+  timer, cancellable and styles. Cancellation during a marker query prevents late
+  bootc launches and style writes. Generation guards retire stale checks across
+  disable/enable, and queued checks must finish before state is asserted.
+
+After changing this path, run the **complete affected module**, then the **full
+discovery suite** (a selected boundary test alone is not sufficient):
+
+```bash
+python3 -m unittest discover -s tests -t tests -v -p 'test_power_status_color.py'
+python3 -m unittest discover -s tests -t tests -v
+# Re-derive contracts and harness scenario names before changing this guide:
+grep -n 'def test_' tests/test_power_status_color.py
+grep -n 'REBOOT_FLAG_FILES\|_statusQueued\|is_cancelled\|generation' extensions/power-status-color/extension.js
+```
+
+These runs prove logic under stubs, **not** the installed build, permissions,
+actor styling, or visible pixels. Also follow [live reboot-alert QA](quick-settings-integration.md#live-reboot-alert-qa)
+to compare source/installed UUID, observe actual Quick Settings, and prove red
+precedence followed by the restored real-input state. Keep thresholds and system
+flags unchanged; complete QA includes restored methods and released owned resources.
 
 ## Extending the suite
 
