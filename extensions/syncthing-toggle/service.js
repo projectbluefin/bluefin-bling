@@ -92,6 +92,16 @@ function command(argv, allowFailure = false) {
     return stdout.replace(/\n$/, '');
 }
 
+function userDirectory(type) {
+    // The XDG file is shell syntax. Older xdg-user-dir scripts leave its
+    // config path unquoted and re-evaluate directory values, losing literal quotes.
+    const lookup = 'config="${XDG_CONFIG_HOME:-$HOME/.config}/user-dirs.dirs"\n' +
+        '[ -f "$config" ] || exit 0\n' +
+        '. "$config"\n' +
+        `printf '%s\\n' "\${XDG_${type}_DIR-}"\n`;
+    return command(['/usr/bin/sh', '-c', lookup]);
+}
+
 function legacyRunning(serviceName) {
     const output = command(['/usr/bin/timeout', '--kill-after=2', '5', '/usr/bin/systemctl',
         '--user', 'show', serviceName, '--property=ActiveState', '--property=MainPID'], true);
@@ -364,7 +374,7 @@ function prepare(request) {
     const mounts = new Map();
     let documentsAvailable = false;
     for (const [id, label, type] of definitions) {
-        const target = existingDirectory(command(['/usr/bin/xdg-user-dir', type]), home);
+        const target = existingDirectory(userDirectory(type), home);
         if (!target)
             continue;
         if (id === 'documents')

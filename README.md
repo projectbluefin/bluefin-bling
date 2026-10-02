@@ -86,7 +86,7 @@ Syncthing container. No separate panel icon or companion desktop app is needed.
 - **Metered networks:** Sharing pauses without erasing the user's login startup choice; a newer off request prevents automatic resume.
 - **Simple controls:** Sharing Settings opens the built-in web UI; Start/Stop only leaves login startup unchanged.
 
-Requires `podman`, `gjs` with Soup 3, and `xdg-user-dir`. The first on request prepares
+Requires `podman`, `gjs` with Soup 3, and the desktop's `xdg-user-dirs` configuration. The first on request prepares
 the private configuration and user Quadlet. Install the whole extension directory,
 including its helper and container template. After replacing an already-loaded
 extension version on Wayland, save work and log out/in to load the new code.

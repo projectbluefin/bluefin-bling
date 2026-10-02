@@ -421,19 +421,29 @@ class SyncthingServiceBehavior(unittest.TestCase):
             self.assertIn("syncthing.service", result.stdout)
             start = next(line for line in result.stdout.splitlines() if line.startswith("ExecStart="))
             args = systemd_arguments(start.removeprefix("ExecStart="))
+            def options(*flags):
+                for index, value in enumerate(args):
+                    if value in flags:
+                        yield args[index + 1]
+                    else:
+                        for flag in flags:
+                            if value.startswith(f"{flag}="):
+                                yield value[len(flag) + 1:]
+                                break
             def option(flag):
-                return args[args.index(flag) + 1]
+                return next(options(flag))
             self.assertEqual(option("--network"), "host")
             self.assertEqual(option("--userns"), "keep-id")
             self.assertEqual(option("--user"), f"{os.getuid()}:{os.getgid()}")
             self.assertEqual(option("--env-file"), response["envFile"])
-            volumes = [args[index + 1] for index, value in enumerate(args) if value in ("-v", "--volume")]
+            volumes = list(options("-v", "--volume"))
             self.assertEqual(set(volumes), {
                 f"{self.state_dir}:/var/syncthing/config:rw",
                 f"{documents}:{documents}:rw", f"{custom}:{custom}:rw",
             })
             self.assertIn("ghcr.io/syncthing/syncthing:2.1.5", args)
-            self.assertIn("label=disable", args)
+            security_options = [re.split("[:=]", value, maxsplit=1) for value in options("--security-opt")]
+            self.assertIn(["label", "disable"], security_options)
             self.assertNotIn(f"{self.home}:{self.home}:rw", volumes)
             key = Path(response["envFile"]).read_text().splitlines()[0].split("=", 1)[1]
             self.assertNotIn(key, result.stdout)

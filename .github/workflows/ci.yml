@@ -53,7 +53,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libglib2.0-bin gjs xdg-user-dirs podman coreutils systemd
-          for tool in realpath id xdg-user-dir timeout systemctl; do
+          for tool in realpath id sh timeout systemctl; do
             test -x "/usr/bin/$tool"
           done
           # Fail rather than silently skip the helper or generator scenarios.

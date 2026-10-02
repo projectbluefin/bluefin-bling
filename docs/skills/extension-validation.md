@@ -49,7 +49,7 @@ The Python runner uses only the standard library — no `pip install`, no
 - `gjs`: the whole `SyncthingServiceBehavior` class in
   `tests/test_syncthing_service_behavior.py` skips when real GJS is absent. The
   helper uses Gio/GLib, not the desktop harness stubs or Soup. Its normal setup
-  calls `/usr/bin/realpath`, `/usr/bin/id`, `/usr/bin/xdg-user-dir`,
+  calls `/usr/bin/realpath`, `/usr/bin/id`, `/usr/bin/sh`,
   `/usr/bin/timeout` and `/usr/bin/systemctl`; these are not individually guarded
   by dependency skips.
 - The helper's generator scenario also requires `podman-system-generator` on
@@ -328,7 +328,7 @@ grep -n "run:" .github/workflows/ci.yml
 
 # Helper dependencies, skip guards, filesystem isolation and generator invocation
 grep -nE 'GJS =|GENERATOR =|podman-system-generator|/usr/libexec/podman/quadlet|skipUnless|skipTest|/usr/bin/|XDG_|--dryrun' tests/test_syncthing_service_behavior.py
-command -v node gjs xdg-user-dir
+command -v node gjs sh
 
 # Controller regression scenarios, including migration and invitation recovery
 grep -n '^    def test_' tests/test_syncthing_toggle_behavior.py

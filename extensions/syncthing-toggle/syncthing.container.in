@@ -21,7 +21,7 @@ SecurityLabelDisable=true
 NoNewPrivileges=true
 DropCapability=all
 HealthCmd=none
-StopTimeout=30
+PodmanArgs=--stop-timeout=30
 
 [Service]
 Restart=on-failure
