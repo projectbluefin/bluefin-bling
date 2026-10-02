@@ -68,6 +68,8 @@ export default class IndicatorExtension extends Extension {
 }
 ```
 
+Item-first teardown disposes the toggle before the indicator. GObject removes the toggle's signals automatically; clear retained handler IDs in its `destroy` callback so indicator teardown does not call `disconnect()` on a disposed actor. Also disconnect that callback when the indicator is destroyed first. Plain JavaScript widget stubs do not model GObject disposal: exercise both orders with real GObjects and `G_DEBUG=fatal-criticals`, and inspect Shell logs with `journalctl --user _COMM=gnome-shell`, not an assumed `gnome-shell.service` unit.
+
 For a menu-only toggle, leave the `SystemIndicator` without icon children:
 `_addIndicator()` is optional. `addExternalIndicator()` registers
 `quickSettingsItems` independently of the panel actor's visibility. Sync Folder

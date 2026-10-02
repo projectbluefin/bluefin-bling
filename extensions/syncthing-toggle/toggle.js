@@ -96,6 +96,11 @@ export var ServiceIndicator = GObject.registerClass(
 			this._clickedSignalId = this._toggle.connect('clicked', () =>
 				this._requestSharing(this._toggle.checked)
 			)
+			// disable() destroys the item before the indicator; its signals are already gone.
+			this._toggleDestroySignalId = this._toggle.connect('destroy', () => {
+				this._clickedSignalId = 0
+				this._toggleDestroySignalId = 0
+			})
 			this._timer = GLib.timeout_add_seconds(
 				GLib.PRIORITY_DEFAULT,
 				statusPollSeconds,
@@ -748,6 +753,9 @@ export var ServiceIndicator = GObject.registerClass(
 				this._networkMonitor.disconnect(this._meteredSignalId)
 			this._meteredSignalId = 0
 			this._networkMonitor = null
+			if (this._toggleDestroySignalId)
+				this._toggle.disconnect(this._toggleDestroySignalId)
+			this._toggleDestroySignalId = 0
 			if (this._clickedSignalId)
 				this._toggle.disconnect(this._clickedSignalId)
 			this._clickedSignalId = 0
