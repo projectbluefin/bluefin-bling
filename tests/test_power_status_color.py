@@ -42,6 +42,19 @@ THRESHOLD_SECONDS = 30 * DAY_SECONDS
 
 REBOOT_FLAG = "/run/reboot-required"
 LEGACY_REBOOT_FLAG = "/var/run/reboot-required"
+COMPOSEFS_STAGED_MARKER = "/run/composefs/staged-deployment"
+OSTREE_STAGED_MARKER = "/run/ostree/staged-deployment"
+
+# The watch set the extension is allowed to install. A regression back to a
+# broad directory watch (or an extra path) would widen this and is what keeps
+# `test_unrelated_file_event_does_not_trigger_a_recheck` honest now that an
+# unwatched path simply has no monitor to fire.
+WATCHED_PATHS = [
+    REBOOT_FLAG,
+    LEGACY_REBOOT_FLAG,
+    COMPOSEFS_STAGED_MARKER,
+    OSTREE_STAGED_MARKER,
+]
 
 BOOTC_STAGED = json.dumps({"status": {"staged": {"image": {"image": "ghcr.io/x:y"}}}})
 BOOTC_CLEAN = json.dumps({"status": {"staged": None, "booted": {"image": {}}}})
@@ -194,6 +207,19 @@ class TestStatusStyling(PowerStatusColorTestCase):
             bootcStdout=BOOTC_CLEAN,
         )
         self.assertEqual(result["classes"], [CLASS_OVERDUE])
+
+    def test_native_staged_marker_colors_button_without_privileged_bootc(self):
+        for path in ("/run/composefs/staged-deployment", "/run/ostree/staged-deployment"):
+            with self.subTest(path=path):
+                result = self.run_scenario(
+                    "checkStatus",
+                    uptimeContent=uptime_file(1 * DAY_SECONDS),
+                    existingFlagFiles=[path],
+                    subprocessThrows=True,
+                    withChild=True,
+                )
+                self.assertEqual(result["classes"], [CLASS_REBOOT])
+                self.assertEqual(result["childClasses"], [CLASS_REBOOT])
 
     def test_reboot_pending_applies_the_yellow_class(self):
         result = self.run_scenario(
@@ -459,7 +485,7 @@ class TestLifecycle(PowerStatusColorTestCase):
         after = result["afterDisable"]
         self.assertFalse(after["enabled"])
         self.assertIsNone(after["timeoutId"])
-        self.assertIsNone(after["fileMonitor"])
+        self.assertIsNone(after["fileMonitors"])
         self.assertIsNone(after["cancellable"])
         self.assertIsNone(after["styledActors"])
         self.assertEqual(after["timeoutsRemoved"], [42])
@@ -490,7 +516,7 @@ class TestLifecycle(PowerStatusColorTestCase):
         self.assertFalse(result["fireAfterDisableThrows"])
         self.assertFalse(result["afterDisable"]["monitorStillConnected"])
 
-    def test_enable_survives_a_failing_run_directory_monitor(self):
+    def test_enable_survives_failing_file_monitors(self):
         result = self.run_scenario(
             "lifecycle",
             monitorThrows=True,
@@ -503,6 +529,40 @@ class TestLifecycle(PowerStatusColorTestCase):
             "a monitor failure must not stop the poll or the initial check",
         )
         self.assertEqual(result["afterDisable"]["timeoutsRemoved"], [42])
+
+    def test_staged_marker_events_update_and_clear_alert_and_release_monitors(self):
+        for path in ("/run/composefs/staged-deployment", "/run/ostree/staged-deployment"):
+            with self.subTest(path=path):
+                result = self.run_scenario(
+                    "markerTransitions", markerPath=path,
+                    uptimeContent=uptime_file(1 * DAY_SECONDS),
+                )
+                self.assertEqual(result["initial"], [])
+                self.assertEqual(result["created"], [CLASS_REBOOT])
+                self.assertEqual(result["replaced"], [CLASS_REBOOT])
+                self.assertEqual(result["removed"], [])
+                self.assertEqual(result["afterDisable"], [])
+                self.assertTrue(result["monitorsReleased"])
+                self.assertFalse(result["monitorStillConnected"])
+
+    def test_monitor_failure_preserves_polling_and_other_marker_events(self):
+        for path, use_polling in (("/run/composefs/staged-deployment", True),
+                                  ("/run/ostree/staged-deployment", False)):
+            with self.subTest(path=path):
+                result = self.run_scenario(
+                    "markerTransitions", markerPath=path, usePolling=use_polling,
+                    failedMonitorPaths=["/run/composefs/staged-deployment"],
+                    uptimeContent=uptime_file(1 * DAY_SECONDS),
+                )
+                self.assertEqual(result["created"], [CLASS_REBOOT])
+                self.assertEqual(result["removed"], [])
+                self.assertEqual(result["afterDisable"], [])
+                self.assertTrue(result["monitorsReleased"])
+
+    def test_disable_during_flag_query_prevents_late_bootc_and_style_writes(self):
+        result = self.run_scenario("cancelDuringFlagProbe")
+        self.assertEqual(result["classes"], [])
+        self.assertIsNone(result["subprocessArgv"])
 
     def test_reboot_required_file_event_triggers_a_recheck(self):
         result = self.run_scenario(
@@ -520,7 +580,16 @@ class TestLifecycle(PowerStatusColorTestCase):
             uptimeContent=uptime_file(1 * DAY_SECONDS),
             existingFlagFiles=[REBOOT_FLAG],
         )
-        self.assertEqual(result["classes"], [], "only reboot-required is interesting")
+        self.assertEqual(result["classes"], [], "unwatched paths must not trigger a recheck")
+        # A per-file monitor makes the event above a no-op by construction, so
+        # the real regression to guard is the watch set itself: a directory
+        # watch on /run (or any extra path) would react to unrelated churn.
+        self.assertCountEqual(
+            result["monitoredPaths"],
+            WATCHED_PATHS,
+            "only the documented reboot/staged markers may be watched",
+        )
+        self.assertNotIn("/run", result["monitoredPaths"])
 
     def test_poll_callback_rechecks_and_keeps_the_source_alive(self):
         result = self.run_scenario(

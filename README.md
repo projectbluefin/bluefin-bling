@@ -57,15 +57,15 @@ new top-level entry fails CI until it is named here.
 
 Visually alters the Quick Settings power button color to indicate system reboot and maintenance state:
 
-- 🟡 **Yellow Alert (`#f6d32d`):** Reboot required. Triggered when a system update is staged via pure `bootc` (`bootc status --format=json` with `status.staged != null`) or when a standard `/run/reboot-required` flag is present.
+- 🟡 **Yellow Alert (`#f6d32d`):** Reboot required. Triggered by bootc's `/run/composefs/staged-deployment` marker, OSTree's `/run/ostree/staged-deployment` marker (also present on rpm-ostree hosts without bootc), a standard `/run/reboot-required` flag (including `/var/run/reboot-required`), or `bootc status --format=json` with `status.staged != null` when that command is permitted.
 - 🔴 **Red Alert (`#e01b24`):** High uptime / reboot overdue. Triggered when host system uptime reaches or exceeds 30 days (`>= 2,592,000` seconds). Takes precedence over yellow reboot alerts.
 - ⚪ **Normal State:** Standard system theme styling when neither condition is met or when the extension is disabled.
 
 #### Architecture & Conventions
 
-- **Pure bootc:** Integrates directly with `bootc status --format=json` to check for staged container image updates, skipping legacy distribution package managers.
+- **Pure bootc:** Detects staged container image updates through user-readable runtime markers without elevated execution. `bootc status --format=json` remains a fallback; on releases that require root, the markers provide detection.
 - **Modern GNOME 45+ ESM:** Implements the modern GNOME Shell Extension class with native ESM imports.
-- **Event-Driven & Polling:** Watches `/run` via `Gio.FileMonitor` for instant reaction to reboot flags, paired with a low-overhead 5-minute background timer for uptime and staged update checks.
+- **Event-Driven & Polling:** Monitors each reboot/staged-deployment file via `Gio.FileMonitor`, including creation and removal, paired with a low-overhead 5-minute timer. Polling remains available if a monitor cannot be installed.
 - **Lifecycle Hygiene:** Gracefully cancels in-flight subprocesses (`Gio.Subprocess.force_exit`), disconnects file monitors, clears `GLib.Source` timeouts, and removes custom CSS classes upon disable.
 
 ### 2. `syncthing-toggle` (Sync Folder Peer Sharing Toggle)
@@ -119,6 +119,8 @@ mkdir -p ~/.local/share/gnome-shell/extensions/power-status-color@projectbluefin
 cp -r extensions/power-status-color/* ~/.local/share/gnome-shell/extensions/power-status-color@projectbluefin.io/
 ```
 
+GNOME Shell caches imported extension modules. When updating an already loaded extension, log out and back in to load the new JavaScript; toggling it alone is not a reload. If an image ships the same extension under a different UUID (such as `power-status-color@local`), use that UUID for a user-level override and in its `metadata.json` instead of enabling two copies. Keep version-validation policy unchanged.
+
 #### Install Sync Folder Toggle
 ```bash
 mkdir -p ~/.local/share/gnome-shell/extensions/syncthing-toggle@projectbluefin.io
@@ -149,15 +151,29 @@ Create a temporary flag file:
 ```bash
 sudo touch /run/reboot-required
 ```
-The power icon turns yellow immediately via the `/run` file monitor.
+The power icon turns yellow immediately via the file monitor.
 
 Clear the alert:
 ```bash
 sudo rm -f /run/reboot-required
 ```
 
+The same yellow state is produced by a real staged deployment. Inspect the
+markers the extension watches without changing anything:
+```bash
+for marker in /run/composefs/staged-deployment /run/ostree/staged-deployment /run/reboot-required /var/run/reboot-required; do
+  test ! -e "$marker" || printf '%s\n' "$marker"
+done
+bootc status --format=json # optional; may require permissions unavailable to Shell
+```
+
 #### 2. Uptime Overdue (Red)
-To simulate 30+ days uptime without waiting, temporarily set `UPTIME_THRESHOLD_SECONDS = 60` in `extensions/power-status-color/extension.js`, restart or re-enable the extension, and observe the red icon.
+To simulate 30+ days uptime without waiting, temporarily set `UPTIME_THRESHOLD_SECONDS = 60` in `extensions/power-status-color/extension.js`, restart or re-enable the extension, and observe the red icon. Restore the production value afterwards.
+
+The decision logic (including the exact boundary — **2,591,999 seconds is not overdue; 2,592,000 seconds is overdue**) is covered without touching the system:
+```bash
+python3 -m unittest discover -s tests -t tests -v -p 'test_power_status_color.py'
+```
 
 ---
 
