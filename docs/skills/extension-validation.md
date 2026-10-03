@@ -228,10 +228,22 @@ If a source starts reaching settings through some other shape, teach that helper
 the new shape — otherwise the unknown-key test goes quietly blind.
 
 `tests/test_compat_scripts.py`
-- covers `scripts/evaluate_aggregate_compat.py` and `scripts/file_compat_issue.py`
+- covers `scripts/evaluate_aggregate_compat.py`, `scripts/file_compat_issue.py` and
+  `scripts/resolve_gnome_channels.py`
 - enforces fail-closed evaluation: fails on missing channel artifacts, ambiguous duplicate artifacts,
   or infrastructure errors
 - enforces issue reporting: fails on empty/missing artifacts and reports run infrastructure errors
+- enforces the issue body contract: `sanitize_text` strips NULs, neutralizes ``` fences and
+  truncates at `MAX_DIAGNOSTICS_LEN`; an out-of-contract UUID, phase or status exits 1 without
+  reaching `gh`; an identical open issue suppresses a duplicate
+- enforces the channel matrix contract: every `image_digest` is pinned by `@sha256:`, the
+  nightly entry carries no `target_major`, and a feed or registry lookup failure exits 1
+
+`scripts/evaluate_aggregate_compat.py` and `scripts/file_compat_issue.py` have no workflow
+caller, so `tests/test_compat_scripts.py` is their only executed coverage. `main()` for
+`file_compat_issue.py` and `resolve_gnome_channels.py` is driven in-process with `run_gh_cmd`
+and the network fetch stubbed; use the module-level `silenced()` helper so a script's own
+`print` output does not bury a real failure in the CI log.
 
 ## Red Flags
 
