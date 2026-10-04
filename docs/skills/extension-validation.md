@@ -267,6 +267,10 @@ the new shape — otherwise the unknown-key test goes quietly blind.
   `scripts/resolve_gnome_channels.py`
 - enforces fail-closed evaluation: fails on missing channel artifacts, ambiguous duplicate artifacts,
   or infrastructure errors
+- enforces the aggregate result contract: a `fail` status (with or without a known phase), an
+  unknown status, a passing result that carries a phase, a missing/extra/duplicate UUID, a wrong
+  `schema_version` or `channel`, and malformed JSON each fail the channel, and one failing channel
+  fails the whole run
 - enforces issue reporting: fails on empty/missing artifacts and reports run infrastructure errors
 - enforces the issue body contract: `sanitize_text` strips NULs, neutralizes ``` fences and
   truncates at `MAX_DIAGNOSTICS_LEN`; an out-of-contract UUID, phase or status exits 1 without
