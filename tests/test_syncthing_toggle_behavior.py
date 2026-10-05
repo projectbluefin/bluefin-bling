@@ -807,6 +807,16 @@ class TestSyncthingToggleConfigSeeding(unittest.TestCase):
         folder = ET.fromstring(written).find("folder")
         self.assertEqual(folder.get("path"), f"{home}/Sync")
 
+    def test_a_home_directory_with_replacement_patterns_is_inserted_literally(self):
+        # String.prototype.replace expands $&, $`, $' and $$ in a string
+        # replacement; a $ in $HOME must not splice config text into the path.
+        home = "/home/a$&b$`c$'d$$e"
+        result = run_scenario("config-seed", homeDir=home)
+        written = result["writes"][0]["text"]
+        self.assertEqual(written.count("</configuration>"), 1)
+        folder = ET.fromstring(written).find("folder")
+        self.assertEqual(folder.get("path"), f"{home}/Sync")
+
     def test_the_default_device_template_is_left_untouched(self):
         # Flipping auto-accept in <defaults> gives every device paired later
         # blanket authority to create folders in $HOME with no prompt, and it
