@@ -127,6 +127,301 @@ class TestEvaluateAggregateCompat(unittest.TestCase):
         self.assertIn("Channel reported infrastructure_error: QEMU boot failed", proc.stderr)
 
 
+class TestEvaluateChannelArtifact(unittest.TestCase):
+    """Every malformed or failing result must make the channel fail.
+
+    Driven in-process so each fail-closed branch is asserted by its own
+    diagnostic instead of one opaque subprocess exit code.
+    """
+
+    UUIDS = {"ext-one@projectbluefin.io", "ext-two@projectbluefin.io"}
+
+    def setUp(self):
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        import evaluate_aggregate_compat
+        self.mod = evaluate_aggregate_compat
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "compat-results-stable.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        sys.path.remove(str(SCRIPTS_DIR))
+
+    def _doc(self, **overrides):
+        doc = {
+            "schema_version": "1.0",
+            "channel": "stable",
+            "infrastructure_error": None,
+            "extensions": [
+                {"uuid": u, "status": "pass", "phase": None} for u in sorted(self.UUIDS)
+            ],
+        }
+        doc.update(overrides)
+        return doc
+
+    def _evaluate(self, payload):
+        self.path.write_text(
+            payload if isinstance(payload, str) else json.dumps(payload),
+            encoding="utf-8",
+        )
+        return self.mod.evaluate_channel_artifact(self.path, "stable", set(self.UUIDS))
+
+    def _assert_fails_with(self, payload, needle):
+        ok, errors = self._evaluate(payload)
+        self.assertFalse(ok)
+        self.assertTrue(
+            any(needle in e for e in errors),
+            msg=f"{needle!r} not in {errors}",
+        )
+        return errors
+
+    def _with_results(self, *results):
+        return self._doc(extensions=list(results))
+
+    def test_all_passing_extensions_validate(self):
+        self.assertEqual(self._evaluate(self._doc()), (True, []))
+
+    def test_failed_extension_fails_the_channel_and_names_its_phase(self):
+        errors = self._assert_fails_with(
+            self._with_results(
+                {"uuid": "ext-one@projectbluefin.io", "status": "pass", "phase": None},
+                {
+                    "uuid": "ext-two@projectbluefin.io",
+                    "status": "fail",
+                    "phase": "enable",
+                    "diagnostics": "TypeError: boom",
+                },
+            ),
+            "Extension 'ext-two@projectbluefin.io' FAILED in phase 'enable': TypeError: boom",
+        )
+        self.assertFalse(any("invalid phase" in e for e in errors), msg=errors)
+
+    def test_failed_extension_with_unknown_phase_reports_both(self):
+        errors = self._assert_fails_with(
+            self._with_results(
+                {"uuid": "ext-one@projectbluefin.io", "status": "pass", "phase": None},
+                {"uuid": "ext-two@projectbluefin.io", "status": "fail", "phase": "reboot"},
+            ),
+            "Failed extension 'ext-two@projectbluefin.io' has invalid phase 'reboot'",
+        )
+        self.assertTrue(any("FAILED in phase 'reboot'" in e for e in errors), msg=errors)
+
+    def test_passing_extension_must_not_carry_a_phase(self):
+        self._assert_fails_with(
+            self._with_results(
+                {"uuid": "ext-one@projectbluefin.io", "status": "pass", "phase": "load"},
+                {"uuid": "ext-two@projectbluefin.io", "status": "pass", "phase": None},
+            ),
+            "Passing extension 'ext-one@projectbluefin.io' must have phase=null, got 'load'",
+        )
+
+    def test_unknown_status_fails(self):
+        self._assert_fails_with(
+            self._with_results(
+                {"uuid": "ext-one@projectbluefin.io", "status": "skipped", "phase": None},
+                {"uuid": "ext-two@projectbluefin.io", "status": "pass", "phase": None},
+            ),
+            "Extension 'ext-one@projectbluefin.io' has invalid status 'skipped'",
+        )
+
+    def test_missing_extension_result_fails(self):
+        self._assert_fails_with(
+            self._with_results(
+                {"uuid": "ext-one@projectbluefin.io", "status": "pass", "phase": None},
+            ),
+            "Missing results for expected extensions: ['ext-two@projectbluefin.io']",
+        )
+
+    def test_extra_extension_result_fails(self):
+        self._assert_fails_with(
+            self._with_results(
+                {"uuid": "ext-one@projectbluefin.io", "status": "pass", "phase": None},
+                {"uuid": "ext-two@projectbluefin.io", "status": "pass", "phase": None},
+                {"uuid": "stray@example.com", "status": "pass", "phase": None},
+            ),
+            "Unexpected extra extension results: ['stray@example.com']",
+        )
+
+    def test_duplicate_extension_result_fails(self):
+        self._assert_fails_with(
+            self._with_results(
+                {"uuid": "ext-one@projectbluefin.io", "status": "pass", "phase": None},
+                {"uuid": "ext-one@projectbluefin.io", "status": "pass", "phase": None},
+                {"uuid": "ext-two@projectbluefin.io", "status": "pass", "phase": None},
+            ),
+            "Duplicate result for extension UUID 'ext-one@projectbluefin.io'",
+        )
+
+    def test_unsupported_schema_version_fails(self):
+        self._assert_fails_with(
+            self._doc(schema_version="2.0"),
+            "Invalid schema_version '2.0' (expected '1.0')",
+        )
+
+    def test_document_channel_must_match_expected_channel(self):
+        self._assert_fails_with(
+            self._doc(channel="development"),
+            "doc.channel 'development' does not match expected 'stable'",
+        )
+
+    def test_unparseable_json_fails(self):
+        self._assert_fails_with("{not json", "Failed to parse JSON")
+
+    def test_non_object_document_fails(self):
+        self._assert_fails_with("[]", "is not a valid JSON object")
+
+    def test_extensions_must_be_a_list(self):
+        self._assert_fails_with(self._doc(extensions={}), "doc.extensions must be a list")
+
+    def test_non_object_entry_fails(self):
+        self._assert_fails_with(
+            self._with_results(
+                "ext-one@projectbluefin.io",
+                {"uuid": "ext-two@projectbluefin.io", "status": "pass", "phase": None},
+            ),
+            "extensions[0] is not an object",
+        )
+
+    def test_entry_without_uuid_fails(self):
+        self._assert_fails_with(
+            self._with_results(
+                {"uuid": "", "status": "pass", "phase": None},
+                {"uuid": "ext-two@projectbluefin.io", "status": "pass", "phase": None},
+            ),
+            "extensions[0] missing valid string 'uuid'",
+        )
+
+
+class TestDiscoverExpectedUuids(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        import evaluate_aggregate_compat
+        self.mod = evaluate_aggregate_compat
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ext_dir = Path(self.tmp.name) / "extensions"
+        self.ext_dir.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        sys.path.remove(str(SCRIPTS_DIR))
+
+    def _extension(self, name, metadata):
+        d = self.ext_dir / name
+        d.mkdir()
+        (d / "metadata.json").write_text(
+            metadata if isinstance(metadata, str) else json.dumps(metadata),
+            encoding="utf-8",
+        )
+
+    def test_collects_uuids_and_ignores_dirs_without_metadata(self):
+        self._extension("a", {"uuid": "a@projectbluefin.io"})
+        self._extension("b", {"uuid": "b@projectbluefin.io"})
+        (self.ext_dir / "not-an-extension").mkdir()
+        self.assertEqual(
+            self.mod.discover_expected_uuids(self.ext_dir),
+            {"a@projectbluefin.io", "b@projectbluefin.io"},
+        )
+
+    def test_matches_the_repository_extensions(self):
+        repo_ext = REPO_ROOT / "extensions"
+        declared = {
+            json.loads((d / "metadata.json").read_text(encoding="utf-8"))["uuid"]
+            for d in repo_ext.iterdir()
+            if (d / "metadata.json").is_file()
+        }
+        self.assertTrue(declared)
+        self.assertEqual(self.mod.discover_expected_uuids(repo_ext), declared)
+
+    def test_missing_directory_raises(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            self.mod.discover_expected_uuids(self.ext_dir / "absent")
+        self.assertIn("Extensions directory not found", str(ctx.exception))
+
+    def test_metadata_without_uuid_raises(self):
+        self._extension("a", {"name": "no uuid"})
+        with self.assertRaises(RuntimeError) as ctx:
+            self.mod.discover_expected_uuids(self.ext_dir)
+        self.assertIn("missing 'uuid'", str(ctx.exception))
+
+    def test_unparseable_metadata_raises(self):
+        self._extension("a", "{not json")
+        with self.assertRaises(RuntimeError) as ctx:
+            self.mod.discover_expected_uuids(self.ext_dir)
+        self.assertIn("Failed to read metadata", str(ctx.exception))
+
+    def test_no_extensions_raises(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            self.mod.discover_expected_uuids(self.ext_dir)
+        self.assertIn("No extensions found", str(ctx.exception))
+
+
+class TestEvaluateAggregateCompatMain(unittest.TestCase):
+    """main() must exit 1 when any channel fails, even if another passes."""
+
+    UUID = "ext-one@projectbluefin.io"
+
+    def setUp(self):
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        import evaluate_aggregate_compat
+        self.mod = evaluate_aggregate_compat
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.artifacts_dir = root / "artifacts"
+        self.artifacts_dir.mkdir()
+        self.ext_dir = root / "extensions"
+        (self.ext_dir / "ext-one").mkdir(parents=True)
+        (self.ext_dir / "ext-one" / "metadata.json").write_text(
+            json.dumps({"uuid": self.UUID}), encoding="utf-8"
+        )
+        self._original_argv = sys.argv
+
+    def tearDown(self):
+        sys.argv = self._original_argv
+        self.tmp.cleanup()
+        sys.path.remove(str(SCRIPTS_DIR))
+
+    def _write(self, channel, status, phase=None):
+        doc = {
+            "schema_version": "1.0",
+            "channel": channel,
+            "infrastructure_error": None,
+            "extensions": [{"uuid": self.UUID, "status": status, "phase": phase}],
+        }
+        (self.artifacts_dir / f"compat-results-{channel}.json").write_text(
+            json.dumps(doc), encoding="utf-8"
+        )
+
+    def _run_main(self, extensions_dir=None):
+        sys.argv = [
+            "evaluate_aggregate_compat.py",
+            "--artifacts-dir",
+            str(self.artifacts_dir),
+            "--extensions-dir",
+            str(extensions_dir or self.ext_dir),
+            "--expected-channels",
+            "stable,development",
+        ]
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit) as ctx:
+                self.mod.main()
+        return ctx.exception.code, err.getvalue()
+
+    def test_one_failing_channel_fails_the_aggregate(self):
+        self._write("stable", "pass")
+        self._write("development", "fail", phase="load")
+        code, stderr = self._run_main()
+        self.assertEqual(code, 1)
+        self.assertIn("[development] Extension 'ext-one@projectbluefin.io' FAILED", stderr)
+        self.assertNotIn("[stable]", stderr)
+        self.assertIn("Aggregate compatibility evaluation failed", stderr)
+
+    def test_extension_discovery_failure_exits_1(self):
+        code, stderr = self._run_main(extensions_dir=Path(self.tmp.name) / "absent")
+        self.assertEqual(code, 1)
+        self.assertIn("Failed discovering extensions", stderr)
+
+
 class TestFileCompatIssue(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
