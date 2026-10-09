@@ -489,7 +489,9 @@ export var ServiceIndicator = GObject.registerClass(
         </versioning>
         <markerName>.stfolder</markerName>
     </folder>\n</configuration>`
-					xml = xml.replace('</configuration>', folderXml)
+					// A replacer function, not a string: a string replacement
+					// expands $&, $` and $' — and $HOME may contain them.
+					xml = xml.replace('</configuration>', () => folderXml)
 				}
 
 				await replaceContentsAsync(configFile, xml, this._cancellable)
