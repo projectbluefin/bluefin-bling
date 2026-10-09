@@ -574,6 +574,9 @@ function makeStubs(options) {
         handlers: new Map(),
         nextHandlerId: 0,
         get_network_metered() {
+            // A portal or NetworkManager hiccup surfaces here as a GError.
+            if (options.meteredProbeThrows)
+                throw new Error('network-metered unavailable');
             return this.metered;
         },
         connect(signal, callback) {
@@ -611,8 +614,16 @@ function makeStubs(options) {
                 return new FakeFile(path, fs);
             },
         },
+        // options.networkMonitor models a session with no usable monitor:
+        // 'throws' (get_default raised) or 'absent' (it returned null).
         NetworkMonitor: {
-            get_default: () => networkMonitor,
+            get_default() {
+                if (options.networkMonitor === 'throws')
+                    throw new Error('no GNetworkMonitor implementation');
+                if (options.networkMonitor === 'absent')
+                    return null;
+                return networkMonitor;
+            },
         },
         icon_new_for_string(name) {
             log.iconStrings.push(name);
@@ -709,7 +720,14 @@ function makeStubs(options) {
         gettext: text => text,
     };
 
-    return {stubs, log, settings, networkMonitor, paths: {homeDir, stateDir, configPath}};
+    return {
+        stubs,
+        log,
+        settings,
+        settingsValues,
+        networkMonitor,
+        paths: {homeDir, stateDir, configPath},
+    };
 }
 
 function makeExtensionObject(settings, options) {
@@ -750,7 +768,7 @@ async function build(options) {
 // enable()/disable() live in extension.js and are the only place the lifecycle
 // — the initial reconcile, the poll source, the teardown — can be observed.
 async function buildExtension(options) {
-    const {stubs, log, networkMonitor, paths} = makeStubs(options);
+    const {stubs, log, settingsValues, networkMonitor, paths} = makeStubs(options);
     globalThis.__stStubs = stubs;
     globalThis.logError = (...args) => log.errors.push(args.map(String));
 
@@ -758,7 +776,14 @@ async function buildExtension(options) {
     const extension = new module.default();
     extension.enable();
     await settle();
-    return {extension, indicator: extension._indicator, log, networkMonitor, paths};
+    return {
+        extension,
+        indicator: extension._indicator,
+        log,
+        settingsValues,
+        networkMonitor,
+        paths,
+    };
 }
 
 // The single installed poll source. Reported rather than asserted on here so an
@@ -789,6 +814,25 @@ function widgetState(indicator) {
 
 function verbs(log) {
     return log.subprocesses.filter(call => call.argv[0] === 'systemctl').map(call => call.argv[2]);
+}
+
+// toggle.js reports a rejected service-name and a missing network monitor
+// through console.error, not logError. Capture it only inside the scenarios
+// that assert on it: the runner's own failure path prints through
+// console.error too, and swallowing that would hide a crashed scenario.
+async function withConsoleErrors(body) {
+    const lines = [];
+    const original = console.error;
+    console.error = (...args) => lines.push(args.map(String).join(' '));
+    try {
+        return await body(lines);
+    } finally {
+        console.error = original;
+    }
+}
+
+function actionVerbs(log) {
+    return log.systemctl.map(argv => argv[2]);
 }
 
 const scenarios = {
@@ -1316,6 +1360,205 @@ const scenarios = {
             statusSubprocesses: log.statusSubprocesses,
             notifications: log.notifications,
             errors: log.errors,
+        };
+    },
+    // A session with no usable GNetworkMonitor: get_default() raised, or it
+    // returned null. The indicator must still come up, read the unit, obey
+    // clicks and tear down cleanly — treating the link as unmetered rather
+    // than refusing to work at all.
+    async 'network-monitor-unavailable'(options) {
+        return withConsoleErrors(async consoleErrors => {
+            const {extension, indicator, log, networkMonitor} = await buildExtension({
+                ...options,
+                unitRunning: options.unitRunning ?? true,
+            });
+            const atEnable = {
+                verbs: actionVerbs(log),
+                statusSubprocesses: log.statusSubprocesses,
+                toggle: toggleState(indicator),
+                meteredHandlers: networkMonitor.handlers.size,
+                notifications: [...log.notifications],
+            };
+
+            log.systemctl.length = 0;
+            indicator._toggle.checked = false;
+            await indicator._toggle.emit('clicked');
+            await settle();
+            const turnedOff = actionVerbs(log);
+
+            log.systemctl.length = 0;
+            indicator._toggle.checked = true;
+            await indicator._toggle.emit('clicked');
+            await settle();
+            const turnedOn = actionVerbs(log);
+
+            let disableError = null;
+            try {
+                extension.disable();
+            } catch (error) {
+                disableError = String(error);
+            }
+            return {
+                atEnable,
+                turnedOff,
+                turnedOn,
+                toggleAfterOn: toggleState(indicator),
+                notifications: log.notifications,
+                consoleErrors: [...consoleErrors],
+                disableError,
+                sourcesLeft: log.sources.size,
+                errors: log.errors,
+            };
+        });
+    },
+
+    // get_network_metered() itself raises. Every reader of it — the enable()
+    // reconcile, the metered signal and the click guard — must fall back to
+    // "unmetered" instead of throwing out of a signal handler.
+    async 'metered-probe-throws'(options) {
+        const {indicator, log, networkMonitor} = await buildExtension({
+            ...options,
+            unitRunning: true,
+            meteredProbeThrows: true,
+        });
+        const atEnable = {verbs: actionVerbs(log), toggle: toggleState(indicator)};
+
+        log.systemctl.length = 0;
+        networkMonitor.emit('notify::network-metered');
+        await settle();
+        const onSignal = {
+            verbs: actionVerbs(log),
+            pausedForMetered: indicator._pausedForMetered,
+        };
+
+        log.systemctl.length = 0;
+        indicator._toggle.checked = false;
+        await indicator._toggle.emit('clicked');
+        await settle();
+        log.systemctl.length = 0;
+        log.notifications.length = 0;
+        indicator._toggle.checked = true;
+        await indicator._toggle.emit('clicked');
+        await settle();
+        return {
+            atEnable,
+            onSignal,
+            clickOn: {
+                verbs: actionVerbs(log),
+                notifications: log.notifications,
+                toggle: toggleState(indicator),
+            },
+            errors: log.errors,
+        };
+    },
+
+    // service-name is edited to a value _validatedServiceName() rejects while
+    // the metered machinery is live. A metered edge must then spawn nothing
+    // and leave _pausedForMetered where it was, so the next edge after the
+    // name is fixed still knows whether sharing was paused by the network.
+    async 'metered-edge-invalid-service'(options) {
+        return withConsoleErrors(async consoleErrors => {
+            const {indicator, log, settingsValues, networkMonitor} = await buildExtension({
+                ...options,
+                unitRunning: true,
+            });
+            const badName = options.badName ?? '--system.service';
+            const edge = async metered => {
+                log.systemctl.length = 0;
+                log.notifications.length = 0;
+                networkMonitor.metered = metered;
+                networkMonitor.emit('notify::network-metered');
+                await settle();
+                return {
+                    verbs: actionVerbs(log),
+                    notifications: log.notifications.map(n => n.title),
+                    pausedForMetered: indicator._pausedForMetered,
+                    toggle: toggleState(indicator),
+                };
+            };
+
+            // Running unit, valid name, then the name goes bad: going metered
+            // cannot stop anything, and must not record a pause it never made.
+            settingsValues['service-name'] = badName;
+            const meteredWhileInvalid = await edge(true);
+
+            // Back to a valid name: a real metered pause.
+            settingsValues['service-name'] = 'syncthing.service';
+            await edge(false);
+            const pausedWithValid = await edge(true);
+
+            // Name goes bad again: the unmetered edge cannot resume, and the
+            // pause flag survives so the retry below still resumes.
+            settingsValues['service-name'] = badName;
+            const unmeteredWhileInvalid = await edge(false);
+
+            settingsValues['service-name'] = 'syncthing.service';
+            await edge(true);
+            const resumedAfterFix = await edge(false);
+
+            return {
+                meteredWhileInvalid,
+                pausedWithValid,
+                unmeteredWhileInvalid,
+                resumedAfterFix,
+                rejections: consoleErrors.filter(line => line.includes(badName)).length,
+                errors: log.errors,
+            };
+        });
+    },
+
+    // enable() with a service-name that fails validation: the status probe and
+    // every poll tick must report "stopped" without spawning systemctl.
+    async 'enable-invalid-service'(options) {
+        return withConsoleErrors(async consoleErrors => {
+            const {indicator, log} = await buildExtension({
+                ...options,
+                unitRunning: true,
+                serviceName: options.serviceName ?? 'syncthing.service; reboot',
+            });
+            const atEnable = {
+                subprocesses: log.subprocesses.length,
+                widgets: widgetState(indicator),
+            };
+            await pollSource(log).callback();
+            await settle();
+            return {
+                atEnable,
+                afterPoll: {
+                    subprocesses: log.subprocesses.length,
+                    widgets: widgetState(indicator),
+                },
+                consoleErrors: [...consoleErrors],
+                errors: log.errors,
+            };
+        });
+    },
+
+    // disable() lands after a metered pause's `stop` succeeded but before the
+    // pause was announced and persisted: the torn-down extension must neither
+    // notify nor run `disable`.
+    async 'disable-mid-metered-pause'(options) {
+        const {extension, indicator, log, networkMonitor} = await buildExtension({
+            ...options,
+            unitRunning: true,
+        });
+        log.systemctl.length = 0;
+        log.notifications.length = 0;
+        log.statusSubprocesses = 0;
+
+        networkMonitor.metered = true;
+        networkMonitor.emit('notify::network-metered');
+        for (let i = 0; i < 50 && log.statusSubprocesses === 0; i++)
+            await Promise.resolve();
+        const stoppedBeforeDisable = actionVerbs(log);
+        extension.disable();
+        await settle();
+
+        return {
+            stoppedBeforeDisable,
+            verbs: actionVerbs(log),
+            notifications: log.notifications,
+            destroyed: indicator._destroyed,
         };
     },
 };
