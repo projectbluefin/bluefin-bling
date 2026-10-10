@@ -231,8 +231,13 @@ Two rules keep these honest:
 - Marker creation/replacement/removal refreshes state. A failed monitor preserves
   other monitors and the five-minute polling fallback; disable releases monitors,
   timer, cancellable and styles. Cancellation during a marker query prevents late
-  bootc launches and style writes. Generation guards retire stale checks across
-  disable/enable, and queued checks must finish before state is asserted.
+  bootc launches and style writes; cancellation during a running bootc probe
+  calls `force_exit()` (tolerating a throw) and discards the late reply.
+  Generation guards retire stale checks across disable/enable, and queued checks
+  must finish before state is asserted.
+- An actor that throws during a style update is dropped, not retained, while the
+  rest are still styled. An actor whose `connect('destroy')` throws is still
+  styled and cleared, and is never `disconnect()`ed.
 
 After changing this path, run the **complete affected module**, then the **full
 discovery suite** (a selected boundary test alone is not sufficient):
