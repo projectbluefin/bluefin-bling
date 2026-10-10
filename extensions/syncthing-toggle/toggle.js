@@ -207,10 +207,6 @@ export var ServiceIndicator = GObject.registerClass(
 			this._networkMonitor = null
 			this._meteredSignalId = 0
 			this._clickedSignalId = 0
-			// True only while the metered handler is holding sharing off. It is the
-			// permission to resume: a network change must never restart sharing the
-			// user turned off by hand.
-			this._pausedForMetered = false
 			// Every subprocess spawned here is tied to this cancellable so that
 			// destroy() can abort in-flight calls instead of letting their
 			// callbacks fire against torn-down widgets.
@@ -296,6 +292,22 @@ export var ServiceIndicator = GObject.registerClass(
 			}
 			// The initial refresh — the unit may already be running when the
 			// session starts — is done once by enable() in extension.js.
+		}
+
+		// True only while the metered handler is holding sharing off. It is the
+		// permission to resume: a network change must never restart sharing the
+		// user turned off by hand. Kept in GSettings, not on the instance: the
+		// pause runs `disable`, which outlives the session, so the permission to
+		// undo it has to as well or reconcile() at the next login on an
+		// unmetered link reads the pause as the user's own choice.
+		get _pausedForMetered() {
+			return this._settings.get_boolean('paused-for-metered')
+		}
+
+		set _pausedForMetered(value) {
+			const paused = Boolean(value)
+			if (this._settings.get_boolean('paused-for-metered') !== paused)
+				this._settings.set_boolean('paused-for-metered', paused)
 		}
 
 		_isNetworkMetered() {

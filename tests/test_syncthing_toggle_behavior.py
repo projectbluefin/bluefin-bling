@@ -707,6 +707,41 @@ class TestSyncthingToggleMeteredReconcile(unittest.TestCase):
 
 
 @unittest.skipIf(NODE is None, "node is not installed; cannot execute toggle.js")
+class TestSyncthingToggleMeteredPauseAcrossSessions(unittest.TestCase):
+    """The pause runs `disable`, so the permission to resume must outlive the session too."""
+
+    def test_a_pause_is_persisted_and_a_resume_clears_it(self):
+        result = run_scenario("metered-transition")
+        self.assertTrue(result["paused"]["pausedForMetered"])
+        self.assertFalse(result["resumed"]["pausedForMetered"])
+
+    def test_a_persisted_pause_resumes_at_login_on_an_unmetered_link(self):
+        result = run_scenario("login-reconcile", persistedPausedForMetered=True)
+        self.assertEqual(result["systemctl"], ["start", "enable"])
+        self.assertEqual(result["notifications"], ["Sync Folder Sharing Resumed"])
+        self.assertFalse(result["pausedForMetered"])
+        self.assertEqual(result["toggle"]["subtitle"], "Running")
+
+    def test_a_persisted_pause_holds_at_login_on_a_metered_link(self):
+        result = run_scenario(
+            "login-reconcile", persistedPausedForMetered=True, metered=True
+        )
+        self.assertEqual(result["systemctl"], [])
+        self.assertEqual(result["notifications"], [])
+        self.assertTrue(result["pausedForMetered"])
+
+    def test_sharing_the_user_turned_off_stays_off_at_login(self):
+        result = run_scenario("login-reconcile")
+        self.assertEqual(result["systemctl"], [])
+        self.assertEqual(result["notifications"], [])
+        self.assertFalse(result["pausedForMetered"])
+
+    def test_a_manual_click_clears_a_persisted_pause(self):
+        result = run_scenario("clicked", checked=False, persistedPausedForMetered=True)
+        self.assertFalse(result["pausedForMetered"])
+
+
+@unittest.skipIf(NODE is None, "node is not installed; cannot execute toggle.js")
 class TestSyncthingToggleConfigSeeding(unittest.TestCase):
     """Seeding ~/Sync and an initial config.xml for a first-run daemon."""
 
