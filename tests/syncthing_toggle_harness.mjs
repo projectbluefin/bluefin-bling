@@ -393,6 +393,7 @@ function makeStubs(options) {
         'icon-name': options.iconName ?? '',
         port: options.port ?? 8384,
         'start-stop-only': options.startStopOnly ?? false,
+        'paused-for-metered': options.persistedPausedForMetered ?? false,
     };
 
     const settings = {
@@ -404,6 +405,9 @@ function makeStubs(options) {
         },
         get_boolean(key) {
             return Boolean(settingsValues[key]);
+        },
+        set_boolean(key, value) {
+            settingsValues[key] = Boolean(value);
         },
     };
 
@@ -1161,6 +1165,23 @@ const scenarios = {
         };
 
         return {paused, resumed, errors: log.errors};
+    },
+
+    // A fresh session (login, Shell restart, extension re-enable) starting with
+    // whatever an earlier session left in GSettings. reconcile() is the only
+    // thing that runs, so it alone decides whether a persisted pause resumes.
+    async 'login-reconcile'(options) {
+        const {indicator, log} = await buildExtension({
+            ...options,
+            unitRunning: options.unitRunning ?? false,
+        });
+        return {
+            systemctl: log.systemctl.map(argv => argv[2]),
+            notifications: log.notifications.map(n => n.title),
+            pausedForMetered: indicator._pausedForMetered,
+            toggle: toggleState(indicator),
+            errors: log.errors,
+        };
     },
 
     // Turning the toggle on over a metered link: refused now, remembered, and
