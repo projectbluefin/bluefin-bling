@@ -424,6 +424,19 @@ const scenarios = {
         ctx.release(gate);
         return snapshot(ctx);
     },
+    // A first start pulls the image inside the unit's start job. Hold that job
+    // past the generic 30 s command bound (timers run 100x fast) and release it.
+    async slowJob(options) {
+        const ctx = await build(options);
+        const gate = options.gate ?? 'systemctl:start';
+        ctx.holds.add(gate);
+        const operation = ctx.click(options.enable ?? true);
+        await ctx.waitHeld(gate);
+        await new Promise(resolve => setTimeout(resolve, options.holdMs ?? 600));
+        ctx.release(gate);
+        await operation;
+        return snapshot(ctx);
+    },
     async rapidRestart(options) {
         const ctx = await build({...options, running: true, provisioned: true, autostart: true});
         await ctx.indicator.checkStatus();

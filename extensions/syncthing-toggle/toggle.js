@@ -12,6 +12,11 @@ import { gettext as _ } from 'resource:///org/gnome/shell/extensions/extension.j
 
 const statusPollSeconds = 60
 const readinessSeconds = 30
+const commandSeconds = 30
+// systemctl waits for the unit job. The first start pulls the image inside that
+// job, so these must exceed TimeoutStartSec/TimeoutStopSec in syncthing.container.in.
+const unitStartSeconds = 960
+const unitStopSeconds = 90
 
 function isObject(value) {
 	return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -172,11 +177,11 @@ export var ServiceIndicator = GObject.registerClass(
 			this._cancellables.delete(scope.cancellable)
 		}
 
-		async _exec(argv, cancellable, allowFailure = false, cleanup = false) {
+		async _exec(argv, cancellable, allowFailure = false, cleanup = false, seconds = commandSeconds) {
 			const generation = this._generation
 			if ((!cleanup && this._destroyed) || cancellable.is_cancelled())
 				throw new Error('Operation cancelled')
-			const scope = this._scope(cancellable, 30000)
+			const scope = this._scope(cancellable, seconds * 1000)
 			let cancelSignal = 0
 			let proc = null
 			try {
@@ -222,8 +227,13 @@ export var ServiceIndicator = GObject.registerClass(
 		}
 
 		_runSystemctl(verb, serviceName, cancellable) {
+			const seconds = {
+				start: unitStartSeconds,
+				stop: unitStopSeconds,
+				restart: unitStopSeconds + unitStartSeconds,
+			}[verb] ?? commandSeconds
 			return this._exec(['systemctl', '--user', verb, ...(serviceName ? [serviceName] : [])],
-				cancellable)
+				cancellable, false, false, seconds)
 		}
 
 		async _helper(action, serviceName, cancellable, enabled = undefined, waitForNative = false) {
@@ -412,7 +422,8 @@ export var ServiceIndicator = GObject.registerClass(
 			// the transition queue waits for it before applying a newer intent.
 			const cancellable = this._newCancellable()
 			try {
-				await this._exec(['systemctl', '--user', 'stop', serviceName], cancellable, false, true)
+				await this._exec(['systemctl', '--user', 'stop', serviceName], cancellable, false, true,
+					unitStopSeconds)
 			} finally {
 				this._cancellables.delete(cancellable)
 			}
