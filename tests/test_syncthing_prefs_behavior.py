@@ -49,6 +49,11 @@ def metadata() -> dict:
     return json.loads(METADATA.read_text(encoding="utf-8"))
 
 
+# Extension-owned state, not preferences: toggle.js writes these itself and the
+# dialog must not offer them.
+INTERNAL_STATE_KEYS = {"paused-for-metered"}
+
+
 def schema_keys() -> set[str]:
     root = ET.parse(GSCHEMA).getroot()
     return {key.get("name") for key in root.iter("key")}
@@ -176,7 +181,13 @@ class TestSettingsBindings(unittest.TestCase):
         # gsettings(1), so the preference is effectively unreachable.
         result = run_scenario("settings-bindings")
         bound = {bind["key"] for bind in result["binds"]}
-        self.assertEqual(bound, schema_keys())
+        self.assertEqual(bound, schema_keys() - INTERNAL_STATE_KEYS)
+
+    def test_internal_state_keys_are_not_exposed_in_the_dialog(self):
+        result = run_scenario("settings-bindings")
+        bound = {bind["key"] for bind in result["binds"]}
+        self.assertTrue(INTERNAL_STATE_KEYS <= schema_keys())
+        self.assertFalse(bound & INTERNAL_STATE_KEYS)
 
     def test_bindings_are_two_way_defaults(self):
         # GET_NO_CHANGES or SET_NO_CHANGES here would make the dialog forget

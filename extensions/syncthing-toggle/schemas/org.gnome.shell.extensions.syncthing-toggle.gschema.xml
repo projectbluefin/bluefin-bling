@@ -18,6 +18,11 @@
 			<summary>The port Syncthing is configured to run on</summary>
 			<description>Set the port Syncthing runs on.</description>
 		</key>
+		<key name="paused-for-metered" type="b">
+			<default>false</default>
+			<summary>Sharing is paused for a metered connection</summary>
+			<description>Internal state. Set while the extension holds sharing off because the network is metered, so an unmetered connection resumes it, including after the next login.</description>
+		</key>
 		<key name="icon-name" type="s">
 			<default>''</default>
 			<summary>Custom Syncthing icon name</summary>
