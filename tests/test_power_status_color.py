@@ -392,6 +392,37 @@ class TestStatusStyling(PowerStatusColorTestCase):
         self.assertIsNone(result["styledActorsAfterDisable"])
         self.assertTrue(result["cancellableCancelled"])
 
+    def test_disposed_current_actor_is_dropped_and_child_still_styled(self):
+        result = self.run_scenario(
+            "currentActorDisposedMidUpdate",
+            uptimeContent=uptime_file(40 * DAY_SECONDS),
+            recheckUptimeContent=uptime_file(1 * DAY_SECONDS),
+            existingFlagFiles=[REBOOT_FLAG],
+            withChild=True,
+        )
+        self.assertEqual(result["trackedAfterFirstCheck"], 2)
+        self.assertFalse(result["threw"], "a disposed power button must not abort _applyStyle")
+        self.assertFalse(
+            result["buttonTracked"],
+            "an actor that threw mid-update must not be retained",
+        )
+        self.assertTrue(result["childTracked"])
+        self.assertEqual(result["childClasses"], [CLASS_REBOOT])
+
+    def test_actor_without_destroy_signal_is_styled_and_cleared(self):
+        result = self.run_scenario(
+            "actorWithoutDestroySignal",
+            uptimeContent=uptime_file(40 * DAY_SECONDS),
+        )
+        self.assertEqual(result["classesAfterEnable"], [CLASS_OVERDUE])
+        self.assertEqual(result["handlerId"], 0)
+        self.assertEqual(result["classesAfterDisable"], [])
+        self.assertEqual(
+            result["disconnectCalls"],
+            0,
+            "no handler was connected, so disable() must not disconnect one",
+        )
+
     def test_concurrent_check_status_calls_are_guarded(self):
         result = self.run_scenario(
             "inFlightGuard",
@@ -563,6 +594,24 @@ class TestLifecycle(PowerStatusColorTestCase):
         result = self.run_scenario("cancelDuringFlagProbe")
         self.assertEqual(result["classes"], [])
         self.assertIsNone(result["subprocessArgv"])
+
+    def test_disable_kills_an_in_flight_bootc_probe(self):
+        for force_exit_throws in (False, True):
+            with self.subTest(force_exit_throws=force_exit_throws):
+                result = self.run_scenario(
+                    "disableKillsInFlightBootc",
+                    bootcStdout=BOOTC_STAGED,
+                    forceExitThrows=force_exit_throws,
+                )
+                self.assertTrue(result["bootcInFlight"])
+                self.assertFalse(result["threw"], "disable() must swallow a failed force_exit()")
+                self.assertEqual(result["forceExitCalls"], 1)
+                self.assertEqual(result["cancelHandlersDisconnected"], 1)
+                self.assertEqual(
+                    result["classes"],
+                    [],
+                    "a bootc reply landing after disable() must not style the button",
+                )
 
     def test_reboot_required_file_event_triggers_a_recheck(self):
         result = self.run_scenario(

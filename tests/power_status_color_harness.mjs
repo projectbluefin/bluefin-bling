@@ -120,6 +120,9 @@ function makeStubs(options) {
         monitorDisconnected: false,
         cancellableCancelled: false,
         subprocessArgv: null,
+        forceExitCalls: 0,
+        cancelHandlersDisconnected: 0,
+        pendingCommunicate: null,
     };
 
     const monitors = [];
@@ -161,11 +164,20 @@ function makeStubs(options) {
                 return this._handlers.length;
             }
 
-            disconnect() {}
+            disconnect(id) {
+                if (this._handlers[id - 1]) {
+                    this._handlers[id - 1] = null;
+                    log.cancelHandlersDisconnected++;
+                }
+            }
 
+            // Like GCancellable, cancel() synchronously runs every connected
+            // 'cancelled' handler; that is what kills an in-flight bootc probe.
             cancel() {
                 log.cancellableCancelled = true;
                 this._cancelled = true;
+                for (const cb of this._handlers)
+                    cb?.(this);
             }
 
             is_cancelled() {
@@ -182,9 +194,19 @@ function makeStubs(options) {
 
             init() {}
 
-            force_exit() {}
+            force_exit() {
+                log.forceExitCalls++;
+                if (options.forceExitThrows)
+                    throw new Error('process already exited');
+            }
 
             communicate_utf8_async(_stdin, _cancellable, cb) {
+                // holdCommunicate keeps bootc in flight until the scenario
+                // releases it, so disable() can land mid-probe.
+                if (options.holdCommunicate) {
+                    log.pendingCommunicate = () => cb(this, 'result');
+                    return;
+                }
                 queueMicrotask(() => cb(this, 'result'));
             }
 
@@ -245,6 +267,15 @@ function makeStubs(options) {
         styleClasses: options.initialClasses ?? [],
         child: options.withChild ? new FakeActor({styleClasses: options.initialClasses ?? []}) : null,
     });
+    if (options.connectThrows) {
+        button.disconnectCalls = 0;
+        button.connect = () => {
+            throw new Error('connect not supported');
+        };
+        button.disconnect = () => {
+            button.disconnectCalls++;
+        };
+    }
 
     let quickSettings;
     if (options.quickSettings === null) {
@@ -413,6 +444,82 @@ const scenarios = {
         ext.disable();
         await new Promise(resolve => setTimeout(resolve, 0));
         return {classes: button.classes(), subprocessArgv: log.subprocessArgv};
+    },
+
+    // disable() while `bootc status` is still running: the cancellable's
+    // handler must kill the child process, and the late reply must not style.
+    async disableKillsInFlightBootc(options) {
+        options.holdCommunicate = true;
+        const {ext, log, button} = await buildExtension(options);
+        ext.enable();
+        for (let i = 0; i < 20 && !log.pendingCommunicate; i++)
+            await new Promise(resolve => setTimeout(resolve, 0));
+        const bootcInFlight = log.subprocessArgv !== null && log.pendingCommunicate !== null;
+
+        let threw = false;
+        try {
+            ext.disable();
+        } catch {
+            threw = true;
+        }
+        const forceExitCalls = log.forceExitCalls;
+
+        log.pendingCommunicate?.();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        return {
+            bootcInFlight,
+            threw,
+            forceExitCalls,
+            cancelHandlersDisconnected: log.cancelHandlersDisconnected,
+            classes: button.classes(),
+        };
+    },
+
+    // The power button Shell still hands back has been disposed without a
+    // 'destroy' we saw. _applyStyle must drop it rather than retain a dead ref,
+    // and still style the live child.
+    async currentActorDisposedMidUpdate(options) {
+        const {ext, button} = await buildExtension(options);
+        ext._enabled = true;
+        ext._cancellable = null;
+        await ext._checkStatus();
+        const trackedAfterFirstCheck = ext._styledActors.size;
+
+        button.disposeSilently();
+        options.uptimeContent = options.recheckUptimeContent;
+
+        let threw = false;
+        try {
+            await ext._checkStatus();
+        } catch {
+            threw = true;
+        }
+        return {
+            trackedAfterFirstCheck,
+            threw,
+            buttonTracked: ext._styledActors.has(button),
+            childTracked: button.child ? ext._styledActors.has(button.child) : null,
+            childClasses: button.child ? button.child.classes() : null,
+        };
+    },
+
+    // An actor whose connect('destroy') throws is still styled and tracked
+    // (with no handler id), and disable() unstyles it without disconnecting.
+    async actorWithoutDestroySignal(options) {
+        options.connectThrows = true;
+        const {ext, button} = await buildExtension(options);
+        ext.enable();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const result = {
+            classesAfterEnable: button.classes(),
+            handlerId: ext._styledActors.get(button) ?? null,
+        };
+        ext.disable();
+        return {
+            ...result,
+            classesAfterDisable: button.classes(),
+            disconnectCalls: button.disconnectCalls,
+        };
     },
 
     async monitorTrigger(options) {
