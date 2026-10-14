@@ -40,7 +40,7 @@ The Quick Settings toggle is the primary surface. Keep its `SystemIndicator` con
 
 ## Container and credentials
 
-The template runs the official pinned image as the user's UID/GID with `UserNS=keep-id`, dropped capabilities, no new privileges, and host networking. Bind the GUI explicitly to `http://127.0.0.1:<port>`: the image's default `0.0.0.0:8384` is unsafe with host networking. The explicit HTTP scheme also prevents an inherited daemon TLS setting from changing the local client's endpoint. See [official container usage](https://github.com/syncthing/syncthing/blob/main/README-Docker.md) and [runtime overrides](https://docs.syncthing.net/users/syncthing.html).
+The template runs the official image pinned by tag **and** `@sha256:` digest (the tag alone is mutable on the registry; Renovate's `*.container.in` manager in `renovate.json` bumps both together) as the user's UID/GID with `UserNS=keep-id`, dropped capabilities, no new privileges, and host networking. Bind the GUI explicitly to `http://127.0.0.1:<port>`: the image's default `0.0.0.0:8384` is unsafe with host networking. The explicit HTTP scheme also prevents an inherited daemon TLS setting from changing the local client's endpoint. See [official container usage](https://github.com/syncthing/syncthing/blob/main/README-Docker.md) and [runtime overrides](https://docs.syncthing.net/users/syncthing.html).
 
 Use `PodmanArgs=--stop-timeout=30` rather than the newer `StopTimeout` Quadlet key so the same graceful-stop behavior also generates successfully with Podman 4.9. See [the supported 4.9 Quadlet options](https://docs.podman.io/en/v4.9.3/markdown/podman-systemd.unit.5.html).
 

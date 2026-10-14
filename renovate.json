@@ -2,5 +2,16 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "local>projectbluefin/renovate-config"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/\\.container\\.in$/"],
+      "matchStrings": [
+        "(?:^|\\r?\\n)Image=(?<depName>[^:@\\s]+):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})(?:\\r?\\n|$)"
+      ],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker"
+    }
   ]
 }
