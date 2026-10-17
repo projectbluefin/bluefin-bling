@@ -241,6 +241,9 @@ and rollback ownership, preserved user edits/deleted presets, cancellation and
 newest-request precedence, metered pause and login intent, and pending invitation
 identity/failure recovery. These are controller-level scenarios with stubbed
 Soup, subprocesses and files; they do not prove a real container or peer sync.
+`tests/test_syncthing_toggle_pending_shape.py` reuses the `pending` scenario with
+`apiErrors` bodies that parse as JSON but are not invitation objects, so the
+shape checks in `_readPending()` fail closed without announcing anything.
 
 Two rules keep these honest:
 
