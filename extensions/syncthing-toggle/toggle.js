@@ -324,6 +324,12 @@ export var ServiceIndicator = GObject.registerClass(
 		// enable() reconciles both facts once, here.
 		async reconcile() {
 			await this.checkStatus()
+			// A running unit is not paused, whatever an earlier session left in
+			// GSettings: with start-stop-only the pause only stopped it, so login
+			// starts it again. A stale flag would read as "already paused" and
+			// leave sharing running on a metered link.
+			if (this._toggle.checked)
+				this._pausedForMetered = false
 			await this._onNetworkMeteredChanged()
 		}
 

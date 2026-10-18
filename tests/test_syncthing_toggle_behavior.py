@@ -730,6 +730,35 @@ class TestSyncthingToggleMeteredPauseAcrossSessions(unittest.TestCase):
         self.assertEqual(result["notifications"], [])
         self.assertTrue(result["pausedForMetered"])
 
+    def test_a_stale_pause_does_not_spare_a_running_unit_on_a_metered_link(self):
+        # start-stop-only: the pause only stopped the unit, so it is running
+        # again at login while the persisted flag still says "paused".
+        result = run_scenario(
+            "login-reconcile",
+            persistedPausedForMetered=True,
+            metered=True,
+            unitRunning=True,
+            startStopOnly=True,
+        )
+        self.assertEqual(result["systemctl"], ["stop"])
+        self.assertEqual(result["notifications"], ["Sync Folder Sharing Paused"])
+        self.assertTrue(result["pausedForMetered"])
+
+    def test_a_stale_pause_is_cleared_when_the_unit_runs_on_an_unmetered_link(self):
+        result = run_scenario(
+            "login-reconcile", persistedPausedForMetered=True, unitRunning=True
+        )
+        self.assertEqual(result["systemctl"], [])
+        self.assertEqual(result["notifications"], [])
+        self.assertFalse(result["pausedForMetered"])
+
+    def test_a_refused_metered_click_resumes_at_the_next_unmetered_login(self):
+        refused = run_scenario("clicked", checked=True, metered=True)
+        self.assertTrue(refused["pausedForMetered"])
+        result = run_scenario("login-reconcile", persistedPausedForMetered=True)
+        self.assertEqual(result["systemctl"], ["start", "enable"])
+        self.assertEqual(result["notifications"], ["Sync Folder Sharing Resumed"])
+
     def test_sharing_the_user_turned_off_stays_off_at_login(self):
         result = run_scenario("login-reconcile")
         self.assertEqual(result["systemctl"], [])
