@@ -309,11 +309,21 @@ function makeContext(options) {
                 },
                 load_contents_finish(result) { if (result.error) throw result.error; return [true, new TextEncoder().encode(result.text)]; },
             })},
-            NetworkMonitor: {get_default: () => ({
-                get_network_metered: () => ctx.metered,
-                connect(_signal, callback) { const id = networkHandlers.size + 1; networkHandlers.set(id, callback); return id; },
-                disconnect(id) { networkHandlers.delete(id); },
-            })},
+            // networkMonitor: 'throws' (get_default raised) or 'absent' (it returned
+            // null) models a session without a usable monitor; meteredProbeThrows
+            // models a portal/NetworkManager error surfacing from the property read.
+            NetworkMonitor: {get_default: () => {
+                if (options.networkMonitor === 'throws') throw new Error('no GNetworkMonitor implementation');
+                if (options.networkMonitor === 'absent') return null;
+                return {
+                    get_network_metered: () => {
+                        if (options.meteredProbeThrows) throw new Error('network-metered unavailable');
+                        return ctx.metered;
+                    },
+                    connect(_signal, callback) { const id = networkHandlers.size + 1; networkHandlers.set(id, callback); return id; },
+                    disconnect(id) { networkHandlers.delete(id); },
+                };
+            }},
             app_info_launch_default_for_uri(url) { ctx.launchedUrl = url; },
         },
         GLib, Soup: {Session, Message: {new: (method, url) => new Message(method, url)}},
@@ -336,11 +346,13 @@ function makeContext(options) {
 
 async function build(options = {}) {
     const ctx = makeContext(options);
+    // Mutable so a scenario can model the user editing service-name mid-session.
+    ctx.serviceName = options.serviceName ?? 'syncthing.service';
     globalThis.__syncthingStubs = ctx.stubs;
     const {ServiceIndicator} = await loadGnomeModule({path: SOURCE, stubsExpression: 'globalThis.__syncthingStubs'});
     ctx.indicator = new ServiceIndicator({path: '/extension', uuid: 'syncthing-toggle@projectbluefin.io',
         getSettings: () => ({
-            get_string: key => key === 'service-name' ? options.serviceName ?? 'syncthing.service' : '',
+            get_string: key => key === 'service-name' ? ctx.serviceName : '',
             get_int: () => options.port ?? 8384,
             get_boolean: () => options.startStopOnly ?? false,
         }), openPreferences() { ctx.preferencesOpened = true; }});
@@ -548,6 +560,48 @@ const scenarios = {
         settings.callback(); ctx.indicator._toggle.webGuiItem.callback();
         return {...snapshot(ctx), settingsVisible: settings.visible, preferencesOpened: ctx.preferencesOpened,
             launchedUrl: ctx.launchedUrl};
+    },
+    // Full lifecycle with no usable NetworkMonitor (options.networkMonitor).
+    async monitorUnavailable(options) {
+        const ctx = await build(options);
+        const steps = {};
+        await ctx.indicator.checkStatus(); steps.initial = snapshot(ctx);
+        await ctx.click(true); steps.on = snapshot(ctx);
+        await ctx.indicator.reconcile(); steps.reconciled = snapshot(ctx);
+        await ctx.click(false); steps.off = snapshot(ctx);
+        ctx.indicator.destroy(); steps.destroyed = snapshot(ctx);
+        return steps;
+    },
+    // A metered probe that raises must count as unmetered at click, on the
+    // signal and at login reconcile.
+    async meteredProbeThrows(options) {
+        const ctx = await build({...options, metered: true, meteredProbeThrows: true});
+        await ctx.click(true); const on = snapshot(ctx);
+        await ctx.setMetered(true); const signalled = snapshot(ctx);
+        await ctx.indicator.reconcile(); const reconciled = snapshot(ctx);
+        return {on, signalled, reconciled};
+    },
+    // Repeated metered edges, and a metered edge while sharing was never on.
+    async meteredRepeat(options) {
+        const ctx = await build(options);
+        await ctx.setMetered(true); const idle = snapshot(ctx);
+        await ctx.click(true);
+        await ctx.setMetered(true); const paused = snapshot(ctx);
+        await ctx.setMetered(true); const repeated = snapshot(ctx);
+        await ctx.setMetered(false); const resumed = snapshot(ctx);
+        return {idle, paused, repeated, resumed};
+    },
+    // The user replaces a working service-name with a rejected one mid-session.
+    async serviceRenamedInvalid(options) {
+        const ctx = await build(options);
+        await ctx.click(true); const on = snapshot(ctx);
+        ctx.serviceName = options.invalidName ?? 'syncthing.service; reboot';
+        await ctx.indicator.checkStatus(); const checked = snapshot(ctx);
+        await ctx.indicator._pollStatusAndPending(); const polled = snapshot(ctx);
+        await ctx.indicator.reconcile(); const reconciled = snapshot(ctx);
+        ctx.serviceName = 'syncthing.service';
+        await ctx.indicator._pollStatusAndPending(); const restored = snapshot(ctx);
+        return {on, checked, polled, reconciled, restored};
     },
 };
 

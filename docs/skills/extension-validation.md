@@ -256,6 +256,12 @@ Two rules keep these honest:
   `enable()`, hoisting the notification above the `systemctl` result — and
   confirming the suite went red.
 
+`tests/test_syncthing_toggle_network_behavior.py` drives the same harness through
+its fail-safes: no usable `Gio.NetworkMonitor` (`networkMonitor: 'throws'` or
+`'absent'`), a metered probe that raises (`meteredProbeThrows`), repeated metered
+edges, and a `service-name` changed to a rejected value mid-session (the
+harness's mutable `ctx.serviceName`).
+
 ## Real GJS deployment-helper coverage
 
 `tests/test_syncthing_service_behavior.py` executes the shipped `service.js` with
