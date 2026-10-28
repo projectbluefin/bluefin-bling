@@ -44,7 +44,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: "24"
+          node-version: "26"
 
       # Exercise both Node desktop harnesses and the standalone real-GJS helper.
       # Ubuntu's Podman package supplies the real Quadlet generator; dry-run
