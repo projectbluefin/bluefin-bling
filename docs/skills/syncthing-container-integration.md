@@ -82,7 +82,17 @@ Retiring a custom share is a configuration operation, not a data deletion. Remov
 
 ## Pending invitations
 
-Read `cluster/pending/devices` and `cluster/pending/folders` through the authenticated API. Device offers are keyed by device ID; folder offers by **folder ID and offering device ID**, so a second peer offering the same folder is new. Replace announcement memory only after both responses are valid and the request is still current. Transport, HTTP and JSON failures preserve it; a successful empty response removes resolved offers, allowing a later re-offer to notify again. Overlapping polls share one in-flight read. This memory is per indicator instance, not durable sharing approval: notifications only direct the user to Sharing Settings and never accept a device or folder.
+Read `cluster/pending/devices` and `cluster/pending/folders` through the authenticated API. Device offers are keyed by device ID; folder offers by **folder ID and offering device ID**, so a second peer offering the same folder is new. Replace announcement memory only after both responses are valid and the request is still current. Transport, HTTP and JSON failures preserve it; a successful empty response removes resolved offers, allowing a later re-offer to notify again. Overlapping polls share one in-flight read. This memory is per indicator instance, not durable sharing approval: notifications never accept a device or folder. Offers for enabled standard folders from paired devices point to the Sync Folder menu; all other invitations still point to Sharing Settings. Invitation checks pause while the screen is locked, so new offers notify at the first poll after unlock. Notification text never includes device names, including in retained lock-screen history.
+
+## Explicit per-device sharing
+
+`sharing.js` owns the standard-folder filter, sharing states, and granular REST mutations. `toggle.js` supplies its authenticated cancellable API, renders one device submenu with an action per enabled preset, and reuses the pending-invitation poll. Opening the menu invalidates an older poll and starts a fresh read with a 4.5-second overall deadline. A mutation has a nine-second deadline including confirmation; failures report refusal or uncertainty and refresh from the daemon, never optimistically show the requested state.
+
+Every share or accept requires the user's action for that folder and device. Automatic acceptance stays off; neither pairing, unpausing, startup nor receiving an offer may call `changeSharing`. Read the folder and paired device again at activation, then PATCH only `devices` on the folder and `ignoredFolders` on the device. Other folder settings, existing peers and device choices remain untouched. Do not change default-device or default-folder settings.
+
+Stopping must remove the peer from the folder **before** writing its durable ignored-folder entry. Syncthing 2.1.5's `DeviceConfiguration.prepare` removes ignore entries for folders still shared with that device, so reversing these calls silently loses suppression. Sharing again removes just that folder's ignore. A partial failure is reported as unconfirmed and followed by a read; do not claim success from the first write alone. See [upstream implementation](https://github.com/syncthing/syncthing/blob/v2.1.5/lib/config/deviceconfiguration.go).
+
+For connected devices, `/rest/db/completion` reports `remoteState: "valid"` once the peer shares the folder; other values mean waiting. Offline devices show only local membership. An ignored offer is neither an Accept action nor a notification. Device names use bounded plain-text labels, and session updates clear the device section and cancel sharing work. Check session permission and generation before and after every awaited API response to prevent late reads or retained callbacks from exposing names or authorizing a write while locked.
 
 ## Red Flags
 
@@ -97,6 +107,11 @@ Read `cluster/pending/devices` and `cluster/pending/folders` through the authent
 
 ```bash
 python3 -m unittest discover -s tests -t tests -v
+# Controller/menu sharing behavior and optional real loopback-only peer proof
+python3 -m unittest discover -s tests -t tests -v -p 'test_syncthing_sharing_behavior.py'
+SYNCTHING_TEST_BINARY=/path/to/syncthing python3 -m unittest discover -s tests -t tests -v -p 'test_syncthing_sharing_integration.py'
+# Re-derive sharing ownership, deadlines, consent and ignored-offer ordering
+rg -n 'changeSharing|ignoredFolders|remoteState|4500|9000|_sharingAllowed|_sharingEpoch' extensions/syncthing-toggle/{sharing,toggle}.js
 # Real helper dependencies and guarded coverage: see extension-validation.md
 python3 -m unittest discover -s tests -t tests -v -p 'test_syncthing_service_behavior.py'
 # Re-derive private-file ownership and request/credential handling from shipped sources

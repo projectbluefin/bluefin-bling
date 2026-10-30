@@ -85,7 +85,8 @@ Syncthing container. No separate panel icon or companion desktop app is needed.
 - **Preserved settings:** Native-service migration keeps identity, database, existing folders and peer approvals. Later toggles preserve user edits and deleted presets.
 - **Metered networks:** Sharing pauses without erasing the user's login startup choice; turning sharing on while metered is remembered across logouts and starts on the next unmetered connection; a newer off request prevents automatic resume.
 - **Protected web UI:** The built-in web page is locked with the login name and a private random password on every start, so other local accounts and sandboxed apps cannot reach it. Sharing Settings copies that password to the clipboard before opening the page; a login the user set themselves is kept.
-- **Simple controls:** Sharing Settings opens the built-in web UI; Start/Stop only leaves login startup unchanged.
+- **Choose who gets each folder:** The Sync Folder menu lists paired devices and lets you share, accept, or stop sharing each enabled standard folder. Pairing and incoming offers never share files on their own.
+- **Simple controls:** Sharing Settings opens the built-in web UI for pairing and advanced choices; Start/Stop only leaves login startup unchanged.
 
 #### Share a folder between two computers
 
@@ -93,11 +94,29 @@ Syncthing container. No separate panel icon or companion desktop app is needed.
    **Sharing Settings**. Sign in if asked; the menu copies the password for you.
 2. Pair the computers in Sharing Settings, approving the other computer on each
    side. Pairing alone does not share any folders.
-3. On the first computer, edit the folder you want to share, select the other
-   computer under **Sharing**, and save. On the second computer, accept the
-   folder offer or edit the matching folder and share it back with the first
-   computer. Both computers must agree before files can sync. Resume the folder
-   on each computer if it is paused.
+3. On the first computer, open the **Sync Folder** menu, choose the other
+   computer, and select **Share** for Documents (or another standard folder
+   that is turned on).
+4. On the second computer, open the **Sync Folder** menu, choose the first
+   computer, and select **Accept** for that folder. Both computers must agree
+   before files can sync. The menu says **Waiting for the other device** until
+   the other computer agrees, then **Sharing** when both are connected.
+
+Only standard folders that are turned on appear here. Turn on other standard
+folders in Sharing Settings on both computers first. Pairing, custom folders,
+paused folders, and offers from unknown devices stay in Sharing Settings.
+
+Choose **Stop sharing** under a device to stop sending and receiving that
+folder with it. Files already copied stay on both computers, and the devices
+stay paired. The other computer's continuing offer will not prompt you to
+share again; you can choose **Share** again whenever you want. Sharing and
+stopping also work while the other computer is away; the menu shows only this
+computer's choice until it reconnects. Leave automatic folder acceptance off
+in Sharing Settings so that it cannot undo a stop without your consent.
+
+If a change is refused or cannot be confirmed, reopen the menu to check the
+actual state before trying again. Device names and sharing controls are hidden
+while the screen is locked.
 
 Existing files in the two folders are brought together. If both computers have
 changed the same file differently, Syncthing keeps a conflict copy; see its

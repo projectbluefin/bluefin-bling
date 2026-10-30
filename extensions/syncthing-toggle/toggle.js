@@ -11,6 +11,8 @@ import {
 import * as Main from 'resource:///org/gnome/shell/ui/main.js'
 import { gettext as _ } from 'resource:///org/gnome/shell/extensions/extension.js'
 
+import { readSharing, changeSharing } from './sharing.js'
+
 const statusPollSeconds = 60
 const readinessSeconds = 30
 const commandSeconds = 30
@@ -51,6 +53,8 @@ const ServiceToggle = GObject.registerClass(
 			this.webGuiItem = itemsSection.addAction(_('Sharing Settings'), openSharingSettings)
 			this.webGuiItem.setSensitive(false)
 			this.menu.addMenuItem(itemsSection)
+			this.sharingSection = new PopupMenu.PopupMenuSection()
+			this.menu.addMenuItem(this.sharingSection)
 			this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem())
 			const settingsItem = this.menu.addAction(_('Extension Settings'), () =>
 				extensionObject.openPreferences()
@@ -80,6 +84,11 @@ export var ServiceIndicator = GObject.registerClass(
 			this._pollPromise = null
 			this._pollCancellable = null
 			this._pendingPromise = null
+			this._sharingEpoch = 0
+			this._renderedEpoch = -1
+			this._sharingBusy = false
+			this._shareCancellable = null
+			this._pendingScope = null
 			this._cancellables = new Set()
 			this._timeouts = new Set()
 			this._announcedPending = new Set()
@@ -93,12 +102,27 @@ export var ServiceIndicator = GObject.registerClass(
 			this._toggle = new ServiceToggle(extensionObject, Gio.icon_new_for_string(iconName),
 				() => this._openSharingSettings())
 			this.quickSettingsItems.push(this._toggle)
+			this._menuSignalId = this._toggle.menu.connect('open-state-changed', (_menu, open) => {
+				if (open)
+					this._refreshSharing()
+			})
+			this._sessionSignalId = Main.sessionMode.connect('updated', () => {
+				++this._sharingEpoch
+				this._shareCancellable?.cancel()
+				this._pendingScope?.cancellable.cancel()
+				this._toggle.sharingSection.removeAll()
+				this._toggle.sharingSection.actor.visible = this._sharingAllowed()
+				if (this._sharingAllowed() && this._toggle.menu.isOpen)
+					this._refreshSharing()
+			})
+			this._toggle.sharingSection.actor.visible = this._sharingAllowed()
 			this._clickedSignalId = this._toggle.connect('clicked', () =>
 				this._requestSharing(this._toggle.checked)
 			)
 			// disable() destroys the item before the indicator; its signals are already gone.
 			this._toggleDestroySignalId = this._toggle.connect('destroy', () => {
 				this._clickedSignalId = 0
+				this._menuSignalId = 0
 				this._toggleDestroySignalId = 0
 			})
 			this._timer = GLib.timeout_add_seconds(
@@ -349,6 +373,7 @@ export var ServiceIndicator = GObject.registerClass(
 				if (status < 200 || status >= 300) {
 					const error = new Error(_('The local file sharing API refused the request.') + ` (HTTP ${status})`)
 					error.transient = status >= 500
+					error.refused = status >= 400 && status < 500
 					throw error
 				}
 				const text = new TextDecoder().decode(bytes.get_data())
@@ -768,12 +793,15 @@ export var ServiceIndicator = GObject.registerClass(
 				this._assertCurrent(generation, cancellable)
 				this.updateStatus(true)
 				if (includePending) {
+					const epoch = this._sharingEpoch
 					try {
 						await this._checkPendingInvitations(generation, cancellable)
 						this._assertCurrent(generation, cancellable)
 					} catch {
 						this._assertCurrent(generation, cancellable)
-						this._toggle.subtitle = _('Invitations unavailable')
+						// A menu open or sharing change cancels the shared read; that is not a failure.
+						if (epoch === this._sharingEpoch)
+							this._toggle.subtitle = _('Invitations unavailable')
 					}
 				}
 				return true
@@ -784,33 +812,156 @@ export var ServiceIndicator = GObject.registerClass(
 			}
 		}
 
+		_sharingAllowed() {
+			return !this._destroyed && Main.sessionMode.allowSettings && !Main.sessionMode.isLocked
+		}
+
+		_sharingApi(generation, cancellable, epoch) {
+			return async (method, path, body) => {
+				const check = () => {
+					this._assertCurrent(generation, cancellable)
+					if (!this._sharingAllowed() || epoch !== this._sharingEpoch)
+						throw new Error('Sharing controls unavailable')
+				}
+				check()
+				const result = await this._api(method, path, cancellable, body)
+				check()
+				return result
+			}
+		}
+
 		_checkPendingInvitations(generation, cancellable) {
-			if (!this._pendingPromise)
-				this._pendingPromise = this._readPending(generation, cancellable).finally(() => {
+			if (!this._sharingAllowed() || this._sharingBusy)
+				return Promise.resolve()
+			if (this._pendingPromise && this._pendingEpoch !== this._sharingEpoch)
+				return this._pendingPromise.catch(() => {}).then(() =>
+					this._checkPendingInvitations(generation, cancellable))
+			if (!this._pendingPromise) {
+				this._pendingEpoch = this._sharingEpoch
+				const scope = this._scope(cancellable, 4500)
+				this._pendingScope = scope
+				this._pendingPromise = this._readPending(generation, scope.cancellable).finally(() => {
+					this._releaseScope(scope)
+					this._pendingScope = null
 					this._pendingPromise = null
 				})
+			}
 			return this._pendingPromise
 		}
 
 		async _readPending(generation, cancellable) {
-			const devices = await this._api('GET', 'cluster/pending/devices', cancellable)
+			const epoch = this._sharingEpoch
+			const state = await readSharing(this._sharingApi(generation, cancellable, epoch))
 			this._assertCurrent(generation, cancellable)
-			const folders = await this._api('GET', 'cluster/pending/folders', cancellable)
-			this._assertCurrent(generation, cancellable)
-			if (!isObject(devices) || !isObject(folders))
-				throw new Error('Invalid pending invitations')
-			const current = new Set(Object.keys(devices).map(id => JSON.stringify(['device', id])))
-			for (const [folderId, folder] of Object.entries(folders)) {
-				if (!isObject(folder) || !isObject(folder.offeredBy))
-					throw new Error('Invalid pending folder invitation')
-				for (const deviceId of Object.keys(folder.offeredBy))
-					current.add(JSON.stringify(['folder', folderId, deviceId]))
+			if (!this._sharingAllowed() || this._sharingBusy || epoch !== this._sharingEpoch)
+				return
+			// Background polls must not rebuild an open menu and collapse its submenus;
+			// opening the menu starts a new epoch that always renders.
+			if (!this._toggle.menu.isOpen || this._renderedEpoch !== epoch) {
+				this._renderSharing(state)
+				this._renderedEpoch = epoch
 			}
-			const hasNew = [...current].some(key => !this._announcedPending.has(key))
+			const current = new Set(state.invitations.map(item => item.key))
+			const fresh = state.invitations.filter(item => !this._announcedPending.has(item.key))
 			this._announcedPending = current
-			if (hasNew)
+			// No device names in notifications, including retained lock-screen history.
+			if (fresh.some(item => item.matching))
+				Main.notify(_('Sync Folder Sharing Invitation'),
+					_('Open the Sync Folder menu to accept a folder from a paired device.'))
+			if (fresh.some(item => !item.matching))
 				Main.notify(_('Sync Folder Sharing Invitation'),
 					_('Open Sharing Settings to review and accept new device or folder invitations.'))
+		}
+
+		_sharingMessage(text) {
+			const section = this._toggle.sharingSection
+			section.removeAll()
+			section.addMenuItem(new PopupMenu.PopupMenuItem(text, { reactive: false }))
+		}
+
+		_renderSharing(state) {
+			const section = this._toggle.sharingSection
+			section.removeAll()
+			if (!this._sharingAllowed())
+				return
+			if (!state.peers.length) {
+				this._sharingMessage(_('No paired devices. Pair in Sharing Settings.'))
+				return
+			}
+			const labels = { documents: _('Documents'), music: _('Music'), pictures: _('Pictures'),
+				videos: _('Videos'), templates: _('Templates') }
+			const states = { notShared: _('Not shared'), shared: _('Shared with this device'),
+				waiting: _('Waiting for the other device'), offered: _('Offered by the other device'),
+				sharing: _('Sharing') }
+			for (const peer of state.peers) {
+				const item = new PopupMenu.PopupSubMenuMenuItem(peer.name + ' — ' +
+					(peer.connected ? _('Connected') : _('Not connected')))
+				section.addMenuItem(item)
+				if (!peer.shares.length)
+					item.menu.addMenuItem(new PopupMenu.PopupMenuItem(
+						_('Turn on a standard folder in Sharing Settings.'), { reactive: false }))
+				for (const folder of peer.shares) {
+					const action = folder.shared ? _('Stop sharing') :
+						(folder.state === 'offered' ? _('Accept') : _('Share'))
+					item.menu.addAction(`${labels[folder.folderId]} — ${states[folder.state]} — ${action}`,
+						() => this._changeSharing(folder.folderId, peer.deviceId, !folder.shared))
+				}
+			}
+		}
+
+		async _refreshSharing() {
+			if (!this._sharingAllowed() || this._sharingBusy)
+				return
+			this._sharingMessage(_('Checking sharing…'))
+			if (!this._observedActive || this._transition) {
+				this._sharingMessage(_('Turn on Sync Folder to share with a device.'))
+				return
+			}
+			const generation = this._generation
+			// Opening the menu must read anew, rather than reuse a snapshot that
+			// a background poll started before the user opened it.
+			const epoch = ++this._sharingEpoch
+			this._pendingScope?.cancellable.cancel()
+			const cancellable = this._newCancellable()
+			try {
+				await this._checkPendingInvitations(generation, cancellable)
+			} catch {
+				if (this._sharingAllowed() && generation === this._generation && epoch === this._sharingEpoch)
+					this._sharingMessage(_('Sharing unavailable. Try opening the menu again.'))
+			} finally {
+				this._cancellables.delete(cancellable)
+			}
+		}
+
+		async _changeSharing(folderId, deviceId, share) {
+			if (!this._sharingAllowed() || this._sharingBusy || !this._observedActive || this._transition)
+				return
+			this._sharingBusy = true
+			++this._sharingEpoch
+			this._pendingScope?.cancellable.cancel()
+			this._sharingMessage(_('Updating sharing…'))
+			const parent = this._newCancellable()
+			this._shareCancellable = parent
+			// Bound the whole change, including confirmation, not each request.
+			const scope = this._scope(parent, 9000)
+			const epoch = this._sharingEpoch
+			const generation = this._generation
+			try {
+				await changeSharing(this._sharingApi(generation, scope.cancellable, epoch),
+					folderId, deviceId, share)
+			} catch (error) {
+				if (this._sharingAllowed() && epoch === this._sharingEpoch)
+					Main.notify(_('Sync Folder Sharing'), error.refused
+						? _('The sharing change was refused. Check the folder in Sharing Settings.')
+						: _('The sharing change could not be confirmed. Check the folder before trying again.'))
+			} finally {
+				this._releaseScope(scope)
+				this._cancellables.delete(parent)
+				this._shareCancellable = null
+				this._sharingBusy = false
+				if (this._sharingAllowed())
+					this._refreshSharing()
+			}
 		}
 
 		updateStatus(active, subtitle = undefined) {
@@ -819,6 +970,8 @@ export var ServiceIndicator = GObject.registerClass(
 			this._observedActive = active
 			this._toggle.set({ checked: active, subtitle: subtitle ?? (active ? _('Running') : _('Stopped')) })
 			this._toggle.webGuiItem.setSensitive(active)
+			if (!active)
+				this._toggle.sharingSection.removeAll()
 		}
 
 		destroy() {
@@ -843,6 +996,12 @@ export var ServiceIndicator = GObject.registerClass(
 				this._networkMonitor.disconnect(this._meteredSignalId)
 			this._meteredSignalId = 0
 			this._networkMonitor = null
+			if (this._sessionSignalId)
+				Main.sessionMode.disconnect(this._sessionSignalId)
+			this._sessionSignalId = 0
+			if (this._menuSignalId)
+				this._toggle.menu.disconnect(this._menuSignalId)
+			this._menuSignalId = 0
 			if (this._toggleDestroySignalId)
 				this._toggle.disconnect(this._toggleDestroySignalId)
 			this._toggleDestroySignalId = 0
