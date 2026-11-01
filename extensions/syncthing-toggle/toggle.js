@@ -231,7 +231,7 @@ export var ServiceIndicator = GObject.registerClass(
 				cancellable, false, false, seconds)
 		}
 
-		async _helper(action, serviceName, cancellable, enabled = undefined, waitForNative = false) {
+		async _helper(action, serviceName, cancellable, enabled = undefined, waitForNative = false, seconds = commandSeconds) {
 			const generation = this._generation
 			const request = { action, serviceName, port: this._settings.get_int('port') }
 			if (enabled !== undefined)
@@ -239,7 +239,7 @@ export var ServiceIndicator = GObject.registerClass(
 			if (waitForNative)
 				request.waitForNative = true
 			const output = await this._exec(
-				['gjs', '-m', this._extensionPath + '/service.js', JSON.stringify(request)], cancellable)
+				['gjs', '-m', this._extensionPath + '/service.js', JSON.stringify(request)], cancellable, false, false, seconds)
 			this._assertCurrent(generation, cancellable)
 			let result
 			try { result = JSON.parse(output) } catch {}
@@ -446,7 +446,7 @@ export var ServiceIndicator = GObject.registerClass(
 					this._assertCurrent(generation, scope.cancellable)
 					if (state === 'active') {
 						const prepared = await this._helper('prepare', serviceName, scope.cancellable,
-							undefined, waitForNative)
+							undefined, waitForNative, unitStartSeconds)
 						this._assertCurrent(generation, scope.cancellable)
 						if (!prepared.nativeStartRequired)
 							return prepared
@@ -565,7 +565,7 @@ export var ServiceIndicator = GObject.registerClass(
 				if (active) {
 					previouslyRunning = await this._readUnitState(serviceName, cancellable)
 					this._assertCurrent(generation, cancellable)
-					let prepared = await this._helper('prepare', serviceName, cancellable)
+					let prepared = await this._helper('prepare', serviceName, cancellable, undefined, false, unitStartSeconds)
 					this._assertCurrent(generation, cancellable)
 					if (prepared.nativeStartRequired) {
 						nativeStartAttempted = true

@@ -157,6 +157,16 @@ function knownNativeUnit(serviceName, activeRequired = false) {
     return true;
 }
 
+function ensureImage(image) {
+    if (command(['/usr/bin/podman', 'image', 'exists', image], true) !== null)
+        return;
+    try {
+        command(['/usr/bin/timeout', '--kill-after=5', '900', '/usr/bin/podman', 'pull', '--', image]);
+    } catch (_) {
+        throw new Error('Could not download the file sharing container image; check network connectivity and retry');
+    }
+}
+
 function legacyFolders(stateDir, image, gid, home, waitForNative = false) {
     const name = `syncthing-folder-inspection-${UID}-${GLib.uuid_string_random()}`;
     try {
@@ -327,6 +337,14 @@ function prepare(request) {
     const nativeActive = legacyRunning(request.serviceName);
     const uninspectedLegacy = previousMetadata === null &&
         file(GLib.build_filenamev([stateDir, 'config.xml'])).query_exists(null);
+    const templateFile = Gio.File.new_for_uri(import.meta.url).get_parent().get_child('syncthing.container.in');
+    const [ok, templateBytes] = templateFile.load_contents(null);
+    if (!ok)
+        throw new Error('Could not load container template');
+    let template = decoder.decode(templateBytes);
+    const image = template.match(/^Image=(\S+)$/m)?.[1];
+    if (!image)
+        throw new Error('Container template has no image');
     if (!nativeActive && uninspectedLegacy) {
         const response = {stateDir, envFile, folders: [], provisioned: false,
             documentsAvailable: false, restartRequired: false, nativeStartRequired: false};
@@ -337,6 +355,7 @@ function prepare(request) {
         }
         if (request.action !== 'prepare' || !knownNativeUnit(request.serviceName))
             throw new Error('Existing Syncthing state cannot be inspected safely; restore the packaged syncthing.service without overrides, then retry');
+        ensureImage(image);
         // The caller owns this temporary start; no managed credentials or units exist yet.
         return {...response, nativeStartRequired: true, restartRequired: true};
     }
@@ -344,16 +363,9 @@ function prepare(request) {
     const gid = command(['/usr/bin/id', '-g']);
     if (!/^\d+$/.test(gid))
         throw new Error('Could not resolve current user group');
-    const templateFile = Gio.File.new_for_uri(import.meta.url).get_parent().get_child('syncthing.container.in');
-    const [ok, templateBytes] = templateFile.load_contents(null);
-    if (!ok)
-        throw new Error('Could not load container template');
-    let template = decoder.decode(templateBytes);
-    const image = template.match(/^Image=(\S+)$/m)?.[1];
-    if (!image)
-        throw new Error('Container template has no image');
     let legacyPaths = (metadata.legacyPaths ?? []).map(absolutePath);
     if (nativeActive) {
+        ensureImage(image);
         const waitForNative = request.action === 'prepare' && request.waitForNative === true &&
             uninspectedLegacy && knownNativeUnit(request.serviceName, true);
         const capturedPaths = legacyFolders(stateDir, image, gid, home, waitForNative);

@@ -73,13 +73,17 @@ class SyncthingServiceBehavior(unittest.TestCase):
         self.state = self.home / "state % café"
         self.config.mkdir(mode=0o700)
         self.state.mkdir(mode=0o700)
+        self.runtime_dir = Path(self.temporary.name) / "runtime"
+        self.runtime_dir.mkdir(mode=0o700)
+        self.host_env = os.environ.copy()
         self.env = {
-            **os.environ,
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": str(self.home),
             "XDG_CONFIG_HOME": str(self.config),
             "XDG_STATE_HOME": str(self.state),
             "XDG_DATA_HOME": str(self.home / "data"),
             "XDG_CACHE_HOME": str(self.home / "cache"),
+            "XDG_RUNTIME_DIR": str(self.runtime_dir),
         }
         self.state_dir = self.state / "syncthing"
         self.quadlet_dir = self.config / "containers" / "systemd"
@@ -94,11 +98,11 @@ class SyncthingServiceBehavior(unittest.TestCase):
             lines.append(f'XDG_{kind}_DIR="{value}"')
         (self.config / "user-dirs.dirs").write_text("\n".join(lines) + "\n")
 
-    def invoke(self, action="prepare", expected_success=True, **kwargs):
+    def invoke(self, action="prepare", expected_success=True, env=None, **kwargs):
         request = {"action": action, "port": 18384, "serviceName": "syncthing.service", **kwargs}
         result = subprocess.run(
             [GJS, "-m", str(HELPER), json.dumps(request)],
-            env=self.env, capture_output=True, text=True, timeout=30,
+            env=self.env if env is None else env, capture_output=True, text=True, timeout=30,
         )
         if expected_success:
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -270,7 +274,7 @@ class SyncthingServiceBehavior(unittest.TestCase):
             ["/usr/bin/systemctl", "--user", "show", "syncthing.service",
              "--property=LoadState", "--property=FragmentPath", "--property=DropInPaths",
              "--property=ActiveState"],
-            env=self.env, capture_output=True, text=True, timeout=10,
+            env=self.host_env, capture_output=True, text=True, timeout=10,
         )
         properties = dict(line.split("=", 1) for line in status.stdout.splitlines() if "=" in line)
         fragment = properties.get("FragmentPath", "")
@@ -284,7 +288,7 @@ class SyncthingServiceBehavior(unittest.TestCase):
                     "cert.pem": b"native certificate\n", "key.pem": b"native private identity\n"}
         for name, contents in identity.items():
             (self.state_dir / name).write_bytes(contents)
-        response = self.invoke()
+        response = self.invoke(env={**self.host_env, **self.env, "XDG_RUNTIME_DIR": self.host_env.get("XDG_RUNTIME_DIR", str(self.runtime_dir)), "DBUS_SESSION_BUS_ADDRESS": self.host_env.get("DBUS_SESSION_BUS_ADDRESS", "")})
         self.assertTrue(response["nativeStartRequired"])
         self.assertTrue(response["restartRequired"])
         self.assertFalse(response["provisioned"])
