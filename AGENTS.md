@@ -51,6 +51,7 @@ bluefin-bling/
 │       ├── metadata.json
 │       ├── extension.js
 │       ├── toggle.js
+│       ├── sharing.js         # Peer folder sharing reads and changes
 │       ├── service.js         # Standalone GJS deployment helper
 │       ├── syncthing.container.in  # Runtime Quadlet template
 │       ├── prefs.js

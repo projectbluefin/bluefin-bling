@@ -2,7 +2,7 @@
 // daemon is a stateful REST boundary, not a replacement for provisioning or
 // transition logic. Deployment/API interoperability is verified on real hosts.
 import {dirname, join} from 'node:path';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath, pathToFileURL} from 'node:url';
 import {loadGnomeModule} from './gnome_module_loader.mjs';
 
 const SOURCE = join(dirname(fileURLToPath(import.meta.url)), '..', 'extensions',
@@ -15,7 +15,11 @@ const clone = value => JSON.parse(JSON.stringify(value));
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 class Menu {
-    constructor() { this.items = []; this.actions = []; this._settingsActions = {}; }
+    constructor() { this.items = []; this.actions = []; this._settingsActions = {}; this.actor = {visible: true}; this.handlers = new Map(); this.nextId = 0; }
+    connect(signal, callback) { const id = ++this.nextId; this.handlers.set(id, {signal, callback}); return id; }
+    disconnect(id) { this.handlers.delete(id); }
+    emit(signal, ...args) { for (const handler of this.handlers.values()) if (handler.signal === signal) handler.callback(this, ...args); }
+    removeAll() { this.items = []; this.actions = []; }
     setHeader(icon, title) { this.header = {icon, title}; }
     addMenuItem(item) { this.items.push(item); }
     addAction(label, callback) {
@@ -246,6 +250,11 @@ function makeContext(options) {
             if (path === 'system/status') return {text: JSON.stringify({myID: ctx.identity})};
             if (path === 'config/gui') return {text: JSON.stringify(ctx.gui)};
             if (path === 'config/folders') return {text: JSON.stringify(ctx.configured)};
+            if (path === 'config/devices') return {text: JSON.stringify(ctx.devices)};
+            if (path === 'system/connections') return {text: JSON.stringify({connections: options.connections ?? {}})};
+            if (path === 'db/completion') return {text: JSON.stringify({remoteState: options.remoteState ?? 'valid'})};
+            if (path.startsWith('config/folders/')) return {text: JSON.stringify(ctx.configured.find(folder => folder.id === decodeURIComponent(path.split('/').pop())))};
+            if (path.startsWith('config/devices/')) return {text: JSON.stringify(ctx.devices.find(device => device.deviceID === decodeURIComponent(path.split('/').pop())))};
             if (path === 'config/defaults/folder') return {text: JSON.stringify(ctx.defaults)};
             if (path === 'cluster/pending/devices') return {text: JSON.stringify(ctx.pendingDevices)};
             if (path === 'cluster/pending/folders') return {text: JSON.stringify(ctx.pendingFolders)};
@@ -259,6 +268,18 @@ function makeContext(options) {
                 ctx.gui.plaintext = message.body.password;
             }
             if (JSON.stringify(ctx.gui) !== before) ctx.listenerRestarting = options.authRestartChecks ?? 1;
+            return {text: ''};
+        }
+        if (message.method === 'PATCH' && (path.startsWith('config/folders/') || path.startsWith('config/devices/'))) {
+            const id = decodeURIComponent(path.split('/').pop());
+            const target = path.startsWith('config/folders/')
+                ? ctx.configured.find(folder => folder.id === id) : ctx.devices.find(device => device.deviceID === id);
+            if (!target) { message.status = 404; return {text: ''}; }
+            Object.assign(target, clone(message.body));
+            // The real daemon removes ignores for folders still shared with a device.
+            for (const device of ctx.devices)
+                device.ignoredFolders = (device.ignoredFolders ?? []).filter(ignored =>
+                    !ctx.configured.some(folder => folder.id === ignored.id && folder.devices?.some(peer => peer.deviceID === device.deviceID)));
             return {text: ''};
         }
         if (message.method === 'POST' && path === 'config/folders') {
@@ -370,8 +391,10 @@ function makeContext(options) {
             _addIndicator() { this.panelIconCount += 1; throw new Error('Separate panel icon is forbidden'); }
             destroy() { this.destroyCount += 1; }
         },
-        PopupMenu: {PopupMenuSection: Menu, PopupSeparatorMenuItem: class {}},
-        Main: {sessionMode: {allowSettings: options.allowSettings ?? true},
+        PopupMenu: {PopupMenuSection: Menu, PopupSeparatorMenuItem: class {},
+            PopupMenuItem: class { constructor(text, params) { this.label = {text}; Object.assign(this, params); } },
+            PopupSubMenuMenuItem: class { constructor(text) { this.label = {text}; this.menu = new Menu(); } }},
+        Main: {sessionMode: Object.assign(new Menu(), {allowSettings: options.allowSettings ?? true, isLocked: false}),
             notify(title, body) { ctx.notifications.push({title, body, active: ctx.indicator?._observedActive}); }},
         gettext: value => value,
     };
@@ -388,7 +411,10 @@ async function build(options = {}) {
     ctx.settings = {'start-stop-only': options.startStopOnly ?? false,
         'resume-when-unmetered': options.resumeWhenUnmetered ?? false};
     globalThis.__syncthingStubs = ctx.stubs;
-    const {ServiceIndicator} = await loadGnomeModule({path: SOURCE, stubsExpression: 'globalThis.__syncthingStubs'});
+    const sharing = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), '..',
+        'extensions', 'syncthing-toggle', 'sharing.js')).href;
+    const {ServiceIndicator} = await loadGnomeModule({path: SOURCE, stubsExpression: 'globalThis.__syncthingStubs',
+        rewrite: source => source.replace("'./sharing.js'", JSON.stringify(sharing))});
     const extension = {path: '/extension', uuid: 'syncthing-toggle@projectbluefin.io',
         getSettings: () => ({
             get_string: key => key === 'service-name' ? ctx.serviceName : '',
@@ -415,6 +441,13 @@ async function build(options = {}) {
 function snapshot(ctx) {
     return {
         checked: ctx.indicator._toggle.checked, subtitle: ctx.indicator._toggle.subtitle,
+        sharingVisible: ctx.indicator._toggle.sharingSection.actor.visible,
+        sharingMenu: ctx.indicator._toggle.sharingSection.items.map(item => ({
+            text: item.label?.text, actions: item.menu?.actions.map(action => action.label),
+            info: item.menu?.items.map(row => row.label?.text),
+        })),
+        sessionHandlers: ctx.stubs.Main.sessionMode.handlers.size,
+        menuHandlers: ctx.indicator._toggle.menu.handlers.size,
         webGuiSensitive: ctx.indicator._toggle.webGuiItem.sensitive,
         desiredOn: ctx.indicator._desiredOn, paused: ctx.indicator._pausedForMetered,
         resumeWhenUnmetered: ctx.settings['resume-when-unmetered'],
@@ -442,6 +475,135 @@ function snapshot(ctx) {
 }
 
 const scenarios = {
+    async realSharing(options) {
+        // Opt-in integration test: disposable credentials travel in the child
+        // environment, never argv or output. This executes the same policy as UI.
+        const {readSharing, changeSharing} = await import(pathToFileURL(join(
+            dirname(SOURCE), 'sharing.js')).href);
+        const api = async (method, path, body) => {
+            const response = await fetch(`http://127.0.0.1:${options.port}/rest/${path}`, {
+                method, headers: {'X-API-Key': process.env.SYNCTHING_TEST_API_KEY,
+                    'Content-Type': 'application/json'},
+                body: body === undefined ? undefined : JSON.stringify(body),
+                signal: AbortSignal.timeout(2000),
+            });
+            if (!response.ok) throw new Error(`REST ${method} ${path}: ${response.status}`);
+            const text = await response.text();
+            return text.trim() ? JSON.parse(text) : null;
+        };
+        if (options.share !== undefined)
+            await changeSharing(api, 'documents', options.device, options.share);
+        return readSharing(api);
+    },
+    async sharingView(options) {
+        const ctx = await build({...options, running: true});
+        await ctx.indicator.checkStatus();
+        await ctx.indicator._refreshSharing();
+        return snapshot(ctx);
+    },
+    async sharingAction(options) {
+        const ctx = await build({...options, running: true});
+        await ctx.indicator.checkStatus();
+        await ctx.indicator._refreshSharing();
+        const before = snapshot(ctx);
+        ctx.notifications = [];
+        // Activate the actual menu callback, not a restatement of the policy.
+        const section = ctx.indicator._toggle.sharingSection;
+        const peer = section.items[options.peerIndex ?? 0];
+        const action = peer?.menu?.actions[options.folderIndex ?? 0];
+        if (!action) throw new Error('Expected a sharing action');
+        if (options.changeBeforeClick) Object.assign(ctx.configured[0], options.changeBeforeClick);
+        if (options.refuse) ctx.apiErrors['PATCH:config/folders/documents'] = {status: 403};
+        const gate = 'api:' + (options.gate ?? 'PATCH:config/folders/documents');
+        if (options.interrupt) ctx.holds.add(gate);
+        const operation = action.callback();
+        if (options.interrupt) {
+            await ctx.waitHeld(gate);
+            if (options.interrupt === 'lock') {
+                ctx.stubs.Main.sessionMode.isLocked = true;
+                ctx.stubs.Main.sessionMode.allowSettings = false;
+                ctx.stubs.Main.sessionMode.emit('updated');
+            } else if (options.interrupt === 'destroy') ctx.indicator.destroy();
+        }
+        await operation;
+        if (options.interrupt) ctx.release(gate);
+        if (!ctx.indicator._destroyed) await ctx.indicator._refreshSharing();
+        const after = snapshot(ctx);
+        if (!ctx.indicator._destroyed) ctx.indicator.destroy();
+        return {before, after, destroyed: snapshot(ctx)};
+    },
+    async sharingReopen(options) {
+        const ctx = await build({...options, running: true});
+        await ctx.indicator.checkStatus();
+        const gate = 'api:GET:system/connections';
+        ctx.holds.add(gate);
+        const old = ctx.indicator._refreshSharing();
+        await ctx.waitHeld(gate);
+        ctx.configured[0].devices.push({deviceID: 'B'});
+        const fresh = ctx.indicator._refreshSharing();
+        await Promise.all([old, fresh]);
+        ctx.release(gate);
+        return snapshot(ctx);
+    },
+    async sharingPollDuringOpen(options) {
+        const ctx = await build({...options, running: true});
+        await ctx.indicator.checkStatus();
+        const gate = 'api:GET:system/connections';
+        ctx.holds.add(gate);
+        const poll = ctx.indicator._pollStatusAndPending();
+        await ctx.waitHeld(gate);
+        ctx.indicator._toggle.menu.isOpen = true;
+        const fresh = ctx.indicator._refreshSharing();
+        await Promise.all([poll, fresh]);
+        ctx.release(gate);
+        return snapshot(ctx);
+    },
+    async sharingPollFailureRecovery(options) {
+        const ctx = await build({...options, running: true});
+        await ctx.indicator.checkStatus();
+        ctx.apiErrors['system/connections'] = {status: 503};
+        await ctx.indicator._pollStatusAndPending();
+        const failed = snapshot(ctx);
+        delete ctx.apiErrors['system/connections'];
+        await ctx.indicator._pollStatusAndPending();
+        return {failed, recovered: snapshot(ctx)};
+    },
+    async sharingPollWithMenu(options) {
+        const ctx = await build({...options, running: true});
+        await ctx.indicator.checkStatus();
+        const toggle = ctx.indicator._toggle;
+        toggle.menu.isOpen = true;
+        await ctx.indicator._refreshSharing();
+        const opened = toggle.sharingSection.items[0];
+        await ctx.indicator._pollStatusAndPending();
+        const keptWhileOpen = toggle.sharingSection.items[0] === opened;
+        ctx.configured[0].devices.push({deviceID: 'B'});
+        await ctx.indicator._refreshSharing();
+        const reopened = snapshot(ctx);
+        const refreshed = toggle.sharingSection.items[0];
+        toggle.menu.isOpen = false;
+        await ctx.indicator._pollStatusAndPending();
+        const renderedWhileClosed = toggle.sharingSection.items[0] !== refreshed;
+        return {keptWhileOpen, renderedWhileClosed, reopened, ...snapshot(ctx)};
+    },
+    async sharingLocked(options) {
+        const ctx = await build({...options, running: true});
+        await ctx.indicator.checkStatus();
+        await ctx.indicator._refreshSharing();
+        const before = snapshot(ctx);
+        const action = ctx.indicator._toggle.sharingSection.items[0]?.menu?.actions[0];
+        ctx.stubs.Main.sessionMode.isLocked = true;
+        ctx.stubs.Main.sessionMode.allowSettings = false;
+        ctx.stubs.Main.sessionMode.emit('updated');
+        await action?.callback();
+        await ctx.indicator._refreshSharing();
+        const locked = snapshot(ctx);
+        ctx.stubs.Main.sessionMode.isLocked = false;
+        ctx.stubs.Main.sessionMode.allowSettings = true;
+        ctx.stubs.Main.sessionMode.emit('updated');
+        await ctx.indicator._refreshSharing();
+        return {before, locked, unlocked: snapshot(ctx)};
+    },
     async initial(options) { const ctx = await build(options); await ctx.click(true); return snapshot(ctx); },
     async firstUse(options) {
         const ctx = await build({...options, running: true});
