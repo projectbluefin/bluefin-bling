@@ -11,6 +11,7 @@ const SECRET = 'private-test-api-key';
 const GUI_PASSWORD = 'private-test-gui-password';
 // What Syncthing stores after hashing a plaintext password handed to its config API.
 const HASHED = '$2a$10$' + 'h'.repeat(53);
+const IMAGE = 'ghcr.io/syncthing/syncthing:test@sha256:' + 'a'.repeat(64);
 const clone = value => JSON.parse(JSON.stringify(value));
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
@@ -34,11 +35,23 @@ class Toggle {
         this.handlers = new Map();
         this.nextId = 0;
     }
+    get subtitle() { return this._subtitle; }
+    set subtitle(value) {
+        if (this.destroyed) this.postDestroyMutations = (this.postDestroyMutations ?? 0) + 1;
+        this._subtitle = value;
+    }
     connect(signal, callback) { const id = ++this.nextId; this.handlers.set(id, {signal, callback}); return id; }
     disconnect(id) { this.handlers.delete(id); }
     emit(signal) { return [...this.handlers.values()].find(value => value.signal === signal)?.callback(); }
-    set(properties) { Object.assign(this, properties); }
-    destroy() { this.destroyed = true; }
+    set(properties) {
+        if (this.destroyed) this.postDestroyMutations = (this.postDestroyMutations ?? 0) + 1;
+        Object.assign(this, properties);
+    }
+    destroy() {
+        this.destroyed = true;
+        this.emit('destroy');
+        this.handlers.clear();
+    }
 }
 
 function makeContext(options) {
@@ -59,6 +72,7 @@ function makeContext(options) {
         gui: {enabled: true, address: '127.0.0.1:8384', user: options.guiUser ?? '',
             password: options.guiPassword ?? '', authMode: options.guiAuthMode ?? 'static',
             apiKey: SECRET, theme: 'default'},
+        guiPlaintext: options.guiPlaintext ?? null,
         // The API listener restarts itself after any GUI change; requests fail until it is back.
         listenerRestarting: 0,
         autostart: options.autostart ?? false,
@@ -80,6 +94,7 @@ function makeContext(options) {
         cancellables: [], timers: new Map(), nextTimer: 0, clock: 0,
         holds: new Set(), held: new Map(), waiters: new Map(),
         activeRequests: 0, killedProcesses: 0, abortCount: 0, authentication: [],
+        activeProcesses: new Set(),
         healthFailures: options.healthFailures ?? 0,
     };
     ctx.waitHeld = key => {
@@ -144,6 +159,12 @@ function makeContext(options) {
                 ctx.commands.push({binary: 'gjs', action: request.action, enabled: request.enabled});
                 this.run = () => {
                     if (options.fail === this.key) { this.success = false; return {stdout: ''}; }
+                    if (request.action === (options.helperErrorAction ?? 'prepare') &&
+                        options.helperOutput !== undefined) {
+                        this.success = false;
+                        return {stdout: options.helperOutput, stderr: GUI_PASSWORD};
+                    }
+                    if (request.action === 'image') return {stdout: JSON.stringify({image: IMAGE})};
                     if (options.legacy && !ctx.legacyCaptured && request.action === 'prepare') {
                         if (!ctx.unitRunning || ctx.nativeReadinessChecks > 0) {
                             if (ctx.unitRunning) ctx.nativeReadinessChecks -= 1;
@@ -165,6 +186,14 @@ function makeContext(options) {
                     }
                     if (request.action === 'autostart') ctx.autostart = request.enabled;
                     return {stdout: options.malformedHelper ? '{invalid' : JSON.stringify(helperResponse())};
+                };
+            } else if (argv[0] === '/usr/bin/podman') {
+                if (argv[1] !== 'pull') throw new Error('Unsupported Podman operation');
+                this.key = 'podman:pull';
+                ctx.commands.push({binary: argv[0], verb: argv[1], argv: argv.slice(2)});
+                this.run = () => {
+                    this.success = options.fail !== this.key;
+                    return {stdout: '', stderr: GUI_PASSWORD};
                 };
             } else if (argv[0] === 'systemctl') {
                 const verb = argv[2];
@@ -201,13 +230,27 @@ function makeContext(options) {
             }
         }
         communicate_utf8_async(_stdin, cancellable, callback) {
-            ctx.schedule(this.key, cancellable, result => callback(this, result), this.run);
+            ctx.activeProcesses.add(this);
+            ctx.schedule(this.key, cancellable, result => {
+                if (!result.error) ctx.activeProcesses.delete(this);
+                callback(this, result);
+            }, this.run);
         }
-        communicate_utf8_finish(result) { if (result.error) throw result.error; return [true, result.stdout, '']; }
+        communicate_utf8_finish(result) { if (result.error) throw result.error; return [true, result.stdout, result.stderr ?? '']; }
         get_successful() { return this.success; }
         force_exit() { ctx.killedProcesses += 1; }
-        wait_async(_cancellable, callback) { setImmediate(() => callback(this, {})); }
-        wait_finish() { return true; }
+        wait_async(_cancellable, callback) {
+            const key = 'reap:' + this.key;
+            const finish = () => callback(this, {});
+            ctx.events.push(key);
+            if (ctx.holds.has(key)) {
+                ctx.holds.delete(key);
+                ctx.held.set(key, finish);
+                ctx.waiters.get(key)?.();
+                ctx.waiters.delete(key);
+            } else setImmediate(finish);
+        }
+        wait_finish() { ctx.activeProcesses.delete(this); return true; }
     }
 
     class Message {
@@ -215,20 +258,30 @@ function makeContext(options) {
         get_request_headers() { return {append: (name, value) => this.headers.set(name, value)}; }
         set_request_body_from_bytes(_type, bytes) { this.body = JSON.parse(new TextDecoder().decode(bytes.get_data())); }
         get_status() { return this.status; }
+        set_flags(flags) { this.flags = flags; }
     }
     const responseFor = message => {
         const path = new URL(message.url).pathname.replace(/^\/rest\//, '');
         const key = message.method + ':' + path;
         const recorded = message.body ? clone(message.body) : undefined;
         if (recorded && typeof recorded.password === 'string') recorded.password = '<redacted>';
-        ctx.apiRequests.push({method: message.method, path, ...(recorded ? {body: recorded} : {})});
-        const authenticated = message.headers.get('X-API-Key') === SECRET;
+        const apiKeyPresent = message.headers.has('X-API-Key');
+        const cookiePresent = message.headers.has('Cookie');
+        const passwordLogin = path === 'noauth/auth/password';
+        const authenticated = message.headers.get('X-API-Key') === SECRET ||
+            (passwordLogin && !apiKeyPresent && !cookiePresent && !message.headers.has('Authorization') &&
+                (ctx.gui.authMode === 'static' || ctx.gui.authMode === undefined) &&
+                Boolean(ctx.gui.user && ctx.gui.password && ctx.guiPlaintext) &&
+                message.body?.username === ctx.gui.user && message.body?.password === ctx.guiPlaintext);
+        ctx.apiRequests.push({method: message.method, path, authentication: passwordLogin ? 'password' : 'api-key',
+            apiKeyPresent, cookiePresent, ...(passwordLogin ? {noRedirect: message.flags === 2} : {}),
+            ...(recorded ? {body: recorded} : {})});
         ctx.authentication.push(authenticated);
-        if (!authenticated) { message.status = 401; return {text: SECRET}; }
+        if (!authenticated) { message.status = passwordLogin ? 403 : 401; return {text: SECRET}; }
         // A legacy process or old listener still uses its previous credentials
         // until systemd actually replaces it with the prepared configuration.
         if (ctx.unitRunning && !ctx.processCurrent) { message.status = 401; return {text: SECRET}; }
-        let error = ctx.apiErrors[key] ?? ctx.apiErrors[path];
+        let error = passwordLogin ? options.loginApiError : ctx.apiErrors[key] ?? ctx.apiErrors[path];
         if (Array.isArray(error)) error = error.length > 1 ? error.shift() : error[0];
         if (error?.transport) throw new Error('Network unreachable');
         if (error) { message.status = error.status ?? 200; return {text: error.raw ?? SECRET}; }
@@ -241,6 +294,7 @@ function makeContext(options) {
             ctx.listenerRestarting -= 1;
             throw new Error('Connection refused');
         }
+        if (passwordLogin) { message.status = 204; return {text: ''}; }
         message.status = 200;
         if (message.method === 'GET') {
             if (path === 'system/status') return {text: JSON.stringify({myID: ctx.identity})};
@@ -257,6 +311,7 @@ function makeContext(options) {
                 !/^\$2[aby]\$/.test(message.body.password)) {
                 ctx.gui.password = HASHED;
                 ctx.gui.plaintext = message.body.password;
+                ctx.guiPlaintext = message.body.password;
             }
             if (JSON.stringify(ctx.gui) !== before) ctx.listenerRestarting = options.authRestartChecks ?? 1;
             return {text: ''};
@@ -354,13 +409,17 @@ function makeContext(options) {
                     disconnect(id) { networkHandlers.delete(id); },
                 };
             }},
-            app_info_launch_default_for_uri(url) { ctx.launchedUrl = url; },
+            app_info_launch_default_for_uri(url) {
+                ctx.launchedUrl = url;
+                ctx.browserLaunches = (ctx.browserLaunches ?? 0) + 1;
+            },
         },
-        GLib, Soup: {Session, Message: {new: (method, url) => new Message(method, url)}},
+        GLib, Soup: {Session, Message: {new: (method, url) => new Message(method, url)}, MessageFlags: {NO_REDIRECT: 2}},
         St: {ClipboardType: {CLIPBOARD: 'clipboard'}, Clipboard: {get_default: () => ({
             set_text(type, text) {
                 if (options.clipboardThrows) throw new Error('No clipboard');
                 ctx.clipboard = {type, text};
+                ctx.clipboardWrites = (ctx.clipboardWrites ?? 0) + 1;
             },
         })}},
         GObject: {registerClass: value => value},
@@ -397,6 +456,7 @@ async function build(options = {}) {
             set_boolean: (key, value) => { ctx.settings[key] = value; },
         }), openPreferences() { ctx.preferencesOpened = true; }};
     ctx.indicator = new ServiceIndicator(extension);
+    ctx.reenable = () => { ctx.indicator = new ServiceIndicator(extension); };
     ctx.click = enabled => { ctx.indicator._toggle.checked = enabled; return ctx.indicator._toggle.emit('clicked'); };
     // Log out and back in: the indicator is rebuilt, GSettings survive, and
     // systemd starts the unit at login only if login startup is enabled.
@@ -429,13 +489,16 @@ function snapshot(ctx) {
         notifications: clone(ctx.notifications), pending: [...ctx.indicator._announcedPending],
         authenticated: ctx.authentication.every(Boolean), requestCount: ctx.authentication.length,
         activeRequests: ctx.activeRequests, killedProcesses: ctx.killedProcesses,
+        activeProcesses: ctx.activeProcesses.size,
         timerCount: ctx.timers.size, cancellationHandlers: ctx.cancellables.reduce((sum, c) => sum + c.handlers.size, 0),
         networkHandlers: ctx.networkHandlers.size, clickHandlers: ctx.indicator._toggle.handlers.size,
         abortCount: ctx.abortCount, destroyCount: ctx.indicator.destroyCount,
         panelIconCount: ctx.indicator.panelIconCount, quickSettingsCount: ctx.indicator.quickSettingsItems.length,
+        events: clone(ctx.events), logs: clone(ctx.logs),
         gui: clone(ctx.gui), guiProtected: Boolean(ctx.gui.user && ctx.gui.password),
         guiPasswordMatches: ctx.gui.plaintext === GUI_PASSWORD,
         clipboardHasPassword: ctx.clipboard?.text === GUI_PASSWORD, launchedUrl: ctx.launchedUrl ?? null,
+        clipboardWrites: ctx.clipboardWrites ?? 0, browserLaunches: ctx.browserLaunches ?? 0,
         secretLeaked: [SECRET, GUI_PASSWORD].some(secret =>
             JSON.stringify([ctx.notifications, ctx.logs, ctx.commands, ctx.apiRequests]).includes(secret)),
     };
@@ -471,6 +534,62 @@ const scenarios = {
         ctx.release(gate);
         await tick();
         return {before, after: snapshot(ctx)};
+    },
+    async nativeReenable(options) {
+        const ctx = await build({...options, running: options.running ?? false, legacy: true});
+        const gate = options.gate ?? 'systemctl:start';
+        ctx.holds.add(gate);
+        const operation = ctx.click(true);
+        await ctx.waitHeld(gate);
+        const before = snapshot(ctx);
+        const old = ctx.indicator;
+        ctx.holds.add('systemctl:stop');
+        old.quickSettingsItems.forEach(item => item.destroy());
+        old.destroy();
+        ctx.reenable();
+        const reconciled = ctx.indicator.reconcile();
+        const successor = ctx.click(true);
+        await ctx.waitHeld('systemctl:stop');
+        await tick();
+        const blocked = snapshot(ctx);
+        const oldResources = {cancellables: old._cancellables.size, timers: old._timeouts.size};
+        if (!options.cleanupTimeout) ctx.release('systemctl:stop');
+        await Promise.all([operation, reconciled, successor]);
+        ctx.release(gate);
+        return {before, blocked, after: snapshot(ctx), oldResources,
+            oldActorMutations: old._toggle.postDestroyMutations ?? 0};
+    },
+    async nativeRunningReenable(options) {
+        const ctx = await build({...options, running: true, legacy: true});
+        ctx.holds.add('helper:prepare');
+        const operation = ctx.click(true);
+        await ctx.waitHeld('helper:prepare');
+        const old = ctx.indicator;
+        old.quickSettingsItems.forEach(item => item.destroy());
+        old.destroy();
+        ctx.reenable();
+        await Promise.all([operation, ctx.click(true)]);
+        return {...snapshot(ctx), oldActorMutations: old._toggle.postDestroyMutations ?? 0};
+    },
+    async imagePullReenable(options) {
+        const ctx = await build(options);
+        ctx.holds.add('podman:pull');
+        ctx.holds.add('reap:podman:pull');
+        const operation = ctx.click(true);
+        await ctx.waitHeld('podman:pull');
+        const before = snapshot(ctx);
+        const old = ctx.indicator;
+        old.quickSettingsItems.forEach(item => item.destroy());
+        old.destroy();
+        ctx.reenable();
+        const reconciled = ctx.indicator.reconcile();
+        const successor = ctx.click(true);
+        await ctx.waitHeld('reap:podman:pull');
+        await tick();
+        const blocked = snapshot(ctx);
+        ctx.release('reap:podman:pull');
+        await Promise.all([operation, reconciled, successor]);
+        return {before, blocked, after: snapshot(ctx), oldActorMutations: old._toggle.postDestroyMutations ?? 0};
     },
     async laterStart(options) {
         const ctx = await build(options);
@@ -624,18 +743,62 @@ const scenarios = {
         await ctx.setMetered(false);
         return {before, after: snapshot(ctx)};
     },
-    // "Sharing Settings" on a running daemon: the page opens and the password
-    // is on the clipboard, except when the credential file predates it.
+    // A genuinely provisioned daemon already has the managed login; merely
+    // declaring it provisioned must not make an unrelated password valid.
     async sharingSettings(options) {
-        const ctx = await build({...options, running: true, provisioned: true});
+        const managed = options.guiPassword === undefined
+            ? {guiUser: 'testuser', guiPassword: HASHED, guiPlaintext: GUI_PASSWORD} : {};
+        const ctx = await build({...managed, ...options, running: true, provisioned: true});
         await ctx.indicator.checkStatus();
-        ctx.indicator._toggle.webGuiItem.callback();
+        if (options.unreachableAfterStatus) ctx.unitRunning = false;
+        await ctx.indicator._toggle.webGuiItem.callback();
+        return snapshot(ctx);
+    },
+    async sharingSettingsAfterStart(options) {
+        const ctx = await build(options);
+        await ctx.click(true);
+        ctx.notifications = [];
+        if (options.reenable) {
+            ctx.indicator.destroy();
+            ctx.reenable();
+            await ctx.indicator.checkStatus();
+        }
+        if (options.changedPassword) {
+            ctx.gui.password = '$2a$10$' + 'c'.repeat(53);
+            ctx.guiPlaintext = 'user-changed-password';
+        }
+        await ctx.indicator._toggle.webGuiItem.callback();
+        return snapshot(ctx);
+    },
+    async sharingSettingsInterrupt(options) {
+        const ctx = await build({guiUser: 'preserved-owner', guiPassword: HASHED,
+            guiPlaintext: GUI_PASSWORD, ...options, running: true, provisioned: true});
+        await ctx.indicator.checkStatus();
+        const gate = options.gate ?? 'api:POST:noauth/auth/password';
+        ctx.holds.add(gate);
+        const opening = ctx.indicator._toggle.webGuiItem.callback();
+        await ctx.waitHeld(gate);
+        if (options.interrupt === 'off') await ctx.click(false);
+        else if (options.interrupt !== 'timeout') ctx.indicator.destroy();
+        await opening;
+        return snapshot(ctx);
+    },
+    async sharingSettingsOverlapping(options) {
+        const ctx = await build({guiUser: 'preserved-owner', guiPassword: HASHED,
+            guiPlaintext: GUI_PASSWORD, ...options, running: true, provisioned: true});
+        await ctx.indicator.checkStatus();
+        const gate = 'api:POST:noauth/auth/password';
+        ctx.holds.add(gate);
+        const stale = ctx.indicator._toggle.webGuiItem.callback();
+        await ctx.waitHeld(gate);
+        const current = ctx.indicator._toggle.webGuiItem.callback();
+        await Promise.all([stale, current]);
         return snapshot(ctx);
     },
     async menu(options) {
         const ctx = await build(options);
         const settings = ctx.indicator._toggle.menu._settingsActions['syncthing-toggle@projectbluefin.io'];
-        settings.callback(); ctx.indicator._toggle.webGuiItem.callback();
+        settings.callback(); await ctx.indicator._toggle.webGuiItem.callback();
         return {...snapshot(ctx), settingsVisible: settings.visible, preferencesOpened: ctx.preferencesOpened,
             launchedUrl: ctx.launchedUrl};
     },

@@ -1,7 +1,7 @@
 ---
 name: extension-validation
 version: "1.2"
-last_updated: "2026-10-02"
+last_updated: "2026-11-01"
 id: extension-validation
 one_line_purpose: Validate extensions and extend the discovery-based test suite.
 entry_point: docs/skills/extension-validation.md
@@ -273,6 +273,8 @@ private modes, provisioning/restart acknowledgement, captured migration mounts,
 and autostart import/off behavior. Rejection cases cover unrelated Quadlets,
 unsafe symlink ancestors, symlink/hardlink credential targets, and uninspectable
 pre-existing daemon state without writing managed credentials or definitions.
+
+Preserve the host locale when isolating XDG paths: GJS must round-trip non-ASCII filenames. Ordinary helper cases use a private `XDG_RUNTIME_DIR` with `DBUS_SESSION_BUS_ADDRESS` removed, so live Syncthing cannot change their migration branch. Only the guarded packaged-native observation restores the host runtime directory/bus, while keeping state and config disposable; it never starts or installs a service. Migration failure fixtures replace only Podman/native observation at the subprocess boundary, retaining real GJS and filesystem checks without registry access.
 
 The guarded real-generator scenario decodes generated systemd argv and checks
 same-UID/GID `keep-id`, host networking, selected mounts without a whole-home

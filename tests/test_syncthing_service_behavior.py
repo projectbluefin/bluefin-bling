@@ -8,6 +8,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -77,7 +78,7 @@ class SyncthingServiceBehavior(unittest.TestCase):
         self.runtime_dir.mkdir(mode=0o700)
         self.host_env = os.environ.copy()
         self.env = {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            **self.host_env,
             "HOME": str(self.home),
             "XDG_CONFIG_HOME": str(self.config),
             "XDG_STATE_HOME": str(self.state),
@@ -85,6 +86,7 @@ class SyncthingServiceBehavior(unittest.TestCase):
             "XDG_CACHE_HOME": str(self.home / "cache"),
             "XDG_RUNTIME_DIR": str(self.runtime_dir),
         }
+        self.env.pop("DBUS_SESSION_BUS_ADDRESS", None)
         self.state_dir = self.state / "syncthing"
         self.quadlet_dir = self.config / "containers" / "systemd"
         self.quadlet = self.quadlet_dir / "syncthing.container"
@@ -98,21 +100,151 @@ class SyncthingServiceBehavior(unittest.TestCase):
             lines.append(f'XDG_{kind}_DIR="{value}"')
         (self.config / "user-dirs.dirs").write_text("\n".join(lines) + "\n")
 
-    def invoke(self, action="prepare", expected_success=True, env=None, **kwargs):
+    def invoke(self, action="prepare", expected_success=True, env=None, helper=HELPER,
+               expected_error=None, **kwargs):
         request = {"action": action, "port": 18384, "serviceName": "syncthing.service", **kwargs}
+        argv = [GJS, "-m", str(HELPER), json.dumps(request)]
+        if helper != HELPER:
+            argv = [GJS, "-m", str(helper), json.dumps(request)]
         result = subprocess.run(
-            [GJS, "-m", str(HELPER), json.dumps(request)],
+            argv,
             env=self.env if env is None else env, capture_output=True, text=True, timeout=30,
         )
         if expected_success:
             self.assertEqual(result.returncode, 0, result.stderr)
             return json.loads(result.stdout)
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, "")
+        if expected_error is None:
+            self.assertEqual(result.stdout, "")
+        else:
+            self.assertEqual(json.loads(result.stdout), {"error": expected_error})
         return result
 
     def metadata(self):
         return json.loads((self.state_dir / "desktop.json").read_text())
+
+    def seam_helper(self, scenario, native_active=False):
+        """Keep real GJS/I/O/timeout; fake only Podman and native observation."""
+        fixture = Path(self.temporary.name) / "helper-seams"
+        fixture.mkdir(exist_ok=True)
+        scenario_file = fixture / "scenario.json"
+        scenario_file.write_text(json.dumps(scenario))
+        events = fixture / "events.jsonl"
+        events.write_text("")
+        podman = fixture / "podman"
+        podman.write_text("#!/usr/bin/python3\n" + textwrap.dedent(f"""\
+            import json
+            import pathlib
+            import sys
+
+            fixture = pathlib.Path({str(fixture)!r})
+            scenario = json.loads((fixture / "scenario.json").read_text())
+            args = sys.argv[1:]
+            with (fixture / "events.jsonl").open("a") as log:
+                log.write(json.dumps(args) + "\\n")
+            action = args[0]
+            status = scenario.get(action + "_status", 0)
+            if status:
+                print("private daemon body, key=do-not-disclose", file=sys.stderr)
+                sys.exit(status)
+            if action == "run":
+                print(scenario.get("raw_response", json.dumps(scenario.get("response", {{"folders": []}}))))
+            elif action != "rm":
+                sys.exit(125)
+            """))
+        podman.chmod(0o700)
+        source = HELPER.read_text()
+        # Native identity is a separate seam; never consult or mutate the host unit.
+        source = source.replace("function legacyRunning(", "function hostLegacyRunning(")
+        source = source.replace("function knownNativeUnit(", "function hostKnownNativeUnit(")
+        source += (f"\nfunction legacyRunning() {{ return {json.dumps(native_active)}; }}\n"
+                   "function knownNativeUnit() { return true; }\n")
+        source = source.replace("'/usr/bin/podman'", json.dumps(str(podman)))
+        helper = fixture / "service.js"
+        helper.write_text(source)
+        shutil.copyfile(HELPER.parent / "syncthing.container.in", fixture / "syncthing.container.in")
+        return helper, scenario_file, events
+
+    def seed_native_state(self):
+        self.state_dir.mkdir(mode=0o700)
+        original = b"private native state; preserve identity and credentials exactly\n"
+        (self.state_dir / "config.xml").write_bytes(original)
+        wants = self.config / "systemd" / "user" / "default.target.wants"
+        wants.mkdir(parents=True, mode=0o700)
+        link = wants / "syncthing.service"
+        link.symlink_to("/usr/lib/systemd/user/syncthing.service")
+        return original, link
+
+    def assert_native_state_untouched(self, original, link):
+        self.assertEqual((self.state_dir / "config.xml").read_bytes(), original)
+        self.assertEqual(str(link.readlink()), "/usr/lib/systemd/user/syncthing.service")
+        self.assertFalse((self.state_dir / "container.env").exists())
+        self.assertFalse((self.state_dir / "desktop.json").exists())
+        self.assertFalse(self.quadlet.exists())
+
+    def test_stopped_native_handshake_does_not_acquire_or_inspect_image(self):
+        original, link = self.seed_native_state()
+        helper, _, events = self.seam_helper({"run_status": 125})
+        response = self.invoke(helper=helper)
+        self.assertTrue(response["nativeStartRequired"])
+        self.assertTrue(response["restartRequired"])
+        self.assertEqual(events.read_text(), "")
+        self.assert_native_state_untouched(original, link)
+
+    def test_native_inspection_errors_have_fixed_categories_without_private_data(self):
+        original, link = self.seed_native_state()
+        for scenario, category in (
+            ({"run_status": 125}, "legacy-inspection-failed"),
+            ({"raw_response": ""}, "legacy-response-invalid"),
+            ({"raw_response": '{"password":"do-not-disclose",'}, "legacy-response-invalid"),
+            ({"response": {"password": "do-not-disclose"}}, "legacy-response-invalid"),
+            ({"response": {"folders": [{"path": "relative-private-path"}]}}, "legacy-response-invalid"),
+            ({"response": {"folders": [{"path": str(self.home / "missing-private-folder")}]}},
+             "legacy-folder-unavailable"),
+        ):
+            with self.subTest(category=category, scenario=scenario):
+                helper, _, events = self.seam_helper(scenario, native_active=True)
+                result = self.invoke(helper=helper, expected_success=False, expected_error=category,
+                                     waitForNative=True)
+                self.assertNotIn("do-not-disclose", result.stdout + result.stderr)
+                self.assertNotIn("private-path", result.stdout + result.stderr)
+                self.assertNotIn("missing-private-folder", result.stdout + result.stderr)
+                self.assertNotIn("leave the native service running", result.stderr)
+                calls = [json.loads(line) for line in events.read_text().splitlines()]
+                self.assertEqual([call[0] for call in calls], ["run", "rm"])
+                self.assertIn("--pull=never", calls[0])
+                self.assert_native_state_untouched(original, link)
+
+    def test_native_readiness_retries_only_cli_not_ready_without_hidden_downloads(self):
+        original, link = self.seed_native_state()
+        folder = self.home / "native folder café"
+        folder.mkdir()
+        helper, scenario, events = self.seam_helper({"run_status": 1}, native_active=True)
+        response = self.invoke(helper=helper, waitForNative=True)
+        self.assertTrue(response["nativeStartRequired"])
+        self.assert_native_state_untouched(original, link)
+        scenario.write_text(json.dumps({"response": {"folders": [{"path": str(folder)}],
+                                                      "password": "do-not-disclose"}}))
+        response = self.invoke(helper=helper, waitForNative=True)
+        self.assertFalse(response["nativeStartRequired"])
+        self.assertTrue(self.metadata()["legacyCaptured"])
+        self.assertEqual(self.metadata()["legacyPaths"], [str(folder)])
+        self.assertNotIn("do-not-disclose", json.dumps(response))
+        self.assertEqual((self.state_dir / "config.xml").read_bytes(), original)
+        calls = [json.loads(line) for line in events.read_text().splitlines()]
+        self.assertEqual([call[0] for call in calls], ["run", "rm", "run", "rm"])
+        self.assertTrue(all("--pull=never" in call for call in calls if call[0] == "run"))
+
+    def test_all_deployment_actions_inspect_native_without_acquiring_an_image(self):
+        original, link = self.seed_native_state()
+        helper, _, events = self.seam_helper({"run_status": 1}, native_active=True)
+        for action, extra in (("prepare", {}), ("autostart", {"enabled": True}), ("provisioned", {})):
+            with self.subTest(action=action):
+                self.invoke(action, helper=helper, expected_success=False,
+                            expected_error="legacy-inspection-failed", **extra)
+                self.assert_native_state_untouched(original, link)
+        calls = [json.loads(line) for line in events.read_text().splitlines()]
+        self.assertEqual([call[0] for call in calls], ["run", "rm"] * 3)
 
     def test_localized_paths_permissions_and_persistent_identity(self):
         documents = self.home / 'Mes documents % & <été> "photos"'
@@ -238,7 +370,7 @@ class SyncthingServiceBehavior(unittest.TestCase):
         before = {path: path.read_bytes() for path in (
             self.quadlet, self.state_dir / "container.env", self.state_dir / "desktop.json")}
         legacy.rmdir()
-        self.invoke(expected_success=False)
+        self.invoke(expected_success=False, expected_error="legacy-folder-unavailable")
         for path, contents in before.items():
             self.assertEqual(path.read_bytes(), contents)
 
@@ -270,11 +402,16 @@ class SyncthingServiceBehavior(unittest.TestCase):
 
     def test_stopped_packaged_native_requests_start_without_managed_files(self):
         # Read-only observation: never install/start a native service from this suite.
+        live_bus_env = {**self.env}
+        if "XDG_RUNTIME_DIR" in self.host_env:
+            live_bus_env["XDG_RUNTIME_DIR"] = self.host_env["XDG_RUNTIME_DIR"]
+        if "DBUS_SESSION_BUS_ADDRESS" in self.host_env:
+            live_bus_env["DBUS_SESSION_BUS_ADDRESS"] = self.host_env["DBUS_SESSION_BUS_ADDRESS"]
         status = subprocess.run(
             ["/usr/bin/systemctl", "--user", "show", "syncthing.service",
              "--property=LoadState", "--property=FragmentPath", "--property=DropInPaths",
              "--property=ActiveState"],
-            env=self.host_env, capture_output=True, text=True, timeout=10,
+            env=live_bus_env, capture_output=True, text=True, timeout=10,
         )
         properties = dict(line.split("=", 1) for line in status.stdout.splitlines() if "=" in line)
         fragment = properties.get("FragmentPath", "")
@@ -288,7 +425,7 @@ class SyncthingServiceBehavior(unittest.TestCase):
                     "cert.pem": b"native certificate\n", "key.pem": b"native private identity\n"}
         for name, contents in identity.items():
             (self.state_dir / name).write_bytes(contents)
-        response = self.invoke(env={**self.host_env, **self.env, "XDG_RUNTIME_DIR": self.host_env.get("XDG_RUNTIME_DIR", str(self.runtime_dir)), "DBUS_SESSION_BUS_ADDRESS": self.host_env.get("DBUS_SESSION_BUS_ADDRESS", "")})
+        response = self.invoke(env=live_bus_env)
         self.assertTrue(response["nativeStartRequired"])
         self.assertTrue(response["restartRequired"])
         self.assertFalse(response["provisioned"])
@@ -487,6 +624,7 @@ class SyncthingServiceBehavior(unittest.TestCase):
                 if not line.startswith("STGUIADDRESS="):
                     self.assertNotIn(line.split("=", 1)[1], result.stdout)
             self.assertEqual("WantedBy=default.target" in result.stdout, enabled)
+
 
 
 if __name__ == "__main__":
