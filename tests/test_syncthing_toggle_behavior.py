@@ -186,7 +186,7 @@ class SyncthingApiControlTests(unittest.TestCase):
                                          for command in result["commands"]), 2)
 
     def test_off_cancellation_and_teardown_never_leave_temporary_native_sharing_running(self):
-        gates = [(gate, {}) for gate in ["helper:prepare", "systemctl:start", "native:activation",
+        gates = [(gate, {}) for gate in ["helper:image", "podman:pull", "helper:prepare", "systemctl:start", "native:activation",
                                        "helper:prepare-native", "systemctl:restart", "api:GET:system/status"]]
         gates.append(("delay", {"nativeApiNotReadyChecks": 2}))
         for interrupt in ["off", "cancel", "destroy"]:
@@ -210,6 +210,49 @@ class SyncthingApiControlTests(unittest.TestCase):
                         self.assertEqual(result["clickHandlers"], 0)
                     else:
                         self.assertEqual(result["notifications"], [])
+
+    def test_reenabled_indicator_waits_for_temporary_native_rollback_before_observing_or_starting(self):
+        for gate in ["systemctl:start", "native:activation", "helper:prepare-native",
+                     "systemctl:restart", "api:GET:system/status"]:
+            with self.subTest(gate=gate):
+                result = run_scenario("nativeReenable", gate=gate)
+                before, blocked, after = result["before"], result["blocked"], result["after"]
+                self.assertEqual(blocked["commands"], before["commands"] + [
+                    {"binary": "systemctl", "verb": "stop", "service": "syncthing.service"}])
+                self.assertEqual(blocked["notifications"], [])
+                self.assertEqual(result["oldResources"], {"cancellables": 0, "timers": 0})
+                self.assertEqual(result["oldActorMutations"], 0)
+                self.assertTrue(after["running"])
+                self.assertTrue(after["checked"])
+                self.assertEqual(after["processKind"], "container")
+                self.assertTrue(after["provisioned"])
+                self.assertEqual(len(after["notifications"]), 1)
+                self.assertTrue(after["notifications"][0]["active"])
+                self.assertEqual(after["activeRequests"], 0)
+                self.assertEqual(after["cancellationHandlers"], 0)
+                self.assertEqual(after["timerCount"], 1)
+                self.assertFalse(after["secretLeaked"])
+
+    def test_temporary_native_rollback_has_a_deadline_and_does_not_hold_reenable_forever(self):
+        result = run_scenario("nativeReenable", cleanupTimeout=True)
+        after = result["after"]
+        self.assertTrue(after["running"])
+        self.assertTrue(after["checked"])
+        self.assertEqual(after["processKind"], "container")
+        self.assertEqual(result["oldActorMutations"], 0)
+        self.assertEqual(result["oldResources"], {"cancellables": 0, "timers": 0})
+        self.assertEqual(after["cancellationHandlers"], 0)
+        self.assertEqual(after["timerCount"], 1)
+        self.assertGreaterEqual(after["killedProcesses"], 2)
+
+    def test_reenable_never_rolls_back_an_initially_running_native_service(self):
+        result = run_scenario("nativeRunningReenable")
+        self.assertTrue(result["running"])
+        self.assertTrue(result["checked"])
+        self.assertTrue(result["provisioned"])
+        self.assertFalse(any(command.get("verb") == "stop" for command in result["commands"]))
+        self.assertEqual(result["oldActorMutations"], 0)
+        self.assertEqual(len(result["notifications"]), 1)
 
     def test_unobserved_active_unit_is_not_stopped_when_api_authentication_fails(self):
         result = run_scenario("initial", running=True,
@@ -324,6 +367,103 @@ class SyncthingApiControlTests(unittest.TestCase):
                 self.assertFalse(result["provisioned"])
                 self.assertEqual(len(result["notifications"]), 1)
                 self.assertFalse(result["secretLeaked"])
+
+    def test_known_helper_error_envelopes_have_fixed_actionable_diagnostics(self):
+        messages = {
+            "legacy-inspection-failed": "Unable to inspect existing file sharing. Check the user service journal and try again.",
+            "legacy-response-invalid": "Existing file sharing returned invalid folder settings. Check the user service journal.",
+            "legacy-folder-unavailable": "An existing shared folder is unavailable. Restore access to it and try again.",
+        }
+        for code, message in messages.items():
+            with self.subTest(code=code):
+                result = run_scenario("initial", helperOutput=json.dumps({"error": code}))
+                self.assertFalse(result["running"])
+                self.assertFalse(result["provisioned"])
+                self.assertEqual(len(result["notifications"]), 1)
+                self.assertEqual(result["notifications"][0]["body"], message)
+                self.assertFalse(result["secretLeaked"])
+
+    def test_unrecognized_or_malformed_helper_envelopes_cannot_supply_diagnostics(self):
+        outputs = ["", "{invalid", "[]", json.dumps({"error": "private-test-gui-password"}),
+                   json.dumps({"error": "image-unavailable"}),
+                   json.dumps({"error": "image-unavailable", "detail": "private-test-gui-password"}),
+                   json.dumps({"error": "toString"})]
+        for output in outputs:
+            with self.subTest(output=output):
+                result = run_scenario("initial", helperOutput=output)
+                self.assertFalse(result["running"])
+                self.assertFalse(result["provisioned"])
+                self.assertEqual(result["notifications"][0]["body"],
+                                 "Try again, or open Sharing Settings to review file sharing.")
+                self.assertFalse(result["secretLeaked"])
+
+    def test_native_image_acquisition_outlasts_readiness_but_occurs_only_before_the_native_loop(self):
+        result = run_scenario("slowJob", legacy=True, gate="podman:pull", holdMs=600,
+                              nativeReadinessChecks=2, nativeApiNotReadyChecks=2)
+        self.assertTrue(result["running"])
+        self.assertTrue(result["provisioned"])
+        self.assertEqual(result["killedProcesses"], 0)
+        actions = [command.get("action") for command in result["commands"]]
+        self.assertEqual(actions.count("image"), 1)
+        self.assertLess(actions.index("image"), actions.index("prepare"))
+        pulls = [command for command in result["commands"] if command["binary"] == "/usr/bin/podman"]
+        self.assertEqual(len(pulls), 1)
+        self.assertEqual(pulls[0]["verb"], "pull")
+        self.assertEqual(pulls[0]["argv"][:2], ["--policy=missing", "--quiet"])
+        self.assertRegex(pulls[0]["argv"][2], r"^ghcr\.io/syncthing/syncthing:[^@\s]+@sha256:[a-f0-9]{64}$")
+        self.assertGreater(actions.count("prepare"), 2)
+
+    def test_turning_off_does_not_require_downloading_an_image(self):
+        result = run_scenario("slowJob", running=True, enable=False, gate="systemctl:stop", holdMs=1,
+                              fail="podman:pull")
+        self.assertFalse(result["running"])
+        self.assertFalse(result["autostart"])
+        self.assertFalse(any(command.get("action") == "image" or command["binary"] == "/usr/bin/podman"
+                             for command in result["commands"]))
+
+    def test_image_acquisition_failure_has_a_fixed_diagnostic_and_never_touches_existing_native_state(self):
+        existing = [{"id": "custom", "path": "/srv/Shared projects", "paused": True,
+                     "devices": [{"deviceID": "APPROVED-PEER"}]}]
+        for running in [False, True]:
+            with self.subTest(running=running):
+                result = run_scenario("initial", running=running, legacy=True, existingFolders=existing,
+                                      fail="podman:pull")
+                self.assertEqual(result["running"], running)
+                self.assertFalse(result["legacyCaptured"])
+                self.assertEqual(result["configured"], existing)
+                self.assertFalse(any(command.get("action") == "prepare" or command.get("verb") in ["stop", "start", "restart"]
+                                     for command in result["commands"]))
+                self.assertEqual(result["notifications"][0]["body"],
+                                 "Unable to download the file sharing image. Check your connection and try again.")
+                self.assertEqual(result["activeProcesses"], 0)
+                self.assertFalse(result["secretLeaked"])
+
+    def test_image_reference_response_is_validated_before_starting_podman(self):
+        for image in ["--help", "ghcr.io/syncthing/syncthing:latest", "docker.io/other/image@sha256:" + "a" * 64,
+                      "private-test-gui-password", "ghcr.io/syncthing/syncthing:test@sha256:" + "a" * 63]:
+            with self.subTest(image=image):
+                result = run_scenario("initial", helperErrorAction="image", helperOutput=json.dumps({"image": image}))
+                self.assertFalse(any(command["binary"] == "/usr/bin/podman" for command in result["commands"]))
+                self.assertFalse(result["running"])
+                self.assertFalse(result["secretLeaked"])
+
+    def test_reenable_waits_until_cancelled_direct_image_pull_has_been_reaped(self):
+        result = run_scenario("imagePullReenable")
+        before, blocked, after = result["before"], result["blocked"], result["after"]
+        self.assertEqual(blocked["commands"], before["commands"])
+        self.assertEqual(blocked["notifications"], [])
+        self.assertEqual(blocked["activeProcesses"], 1)
+        self.assertEqual(blocked["killedProcesses"], 1)
+        self.assertFalse(blocked["running"])
+        self.assertEqual(result["oldActorMutations"], 0)
+        self.assertEqual(after["activeProcesses"], 0)
+        self.assertEqual(after["cancellationHandlers"], 0)
+        self.assertEqual(after["timerCount"], 1)
+        self.assertTrue(after["running"])
+        self.assertTrue(after["provisioned"])
+        self.assertEqual(len(after["notifications"]), 1)
+        self.assertTrue(after["notifications"][0]["active"])
+        self.assertFalse(after["secretLeaked"])
 
     def test_setup_failure_does_not_stop_a_preexisting_users_service(self):
         result = run_scenario("initial", running=True, fail="helper:prepare")
@@ -539,7 +679,7 @@ class SyncthingApiControlTests(unittest.TestCase):
 
     def test_disable_cancels_in_flight_resources_without_stopping_users_service(self):
         boundaries = [
-            (gate, {}) for gate in ["systemctl:is-active", "helper:prepare", "systemctl:daemon-reload",
+            (gate, {}) for gate in ["systemctl:is-active", "helper:image", "podman:pull", "helper:prepare", "systemctl:daemon-reload",
                                    "file:credentials", "systemctl:start", "api:GET:system/status",
                                    "helper:provisioned"]
         ] + [("systemctl:restart", {"running": True, "legacy": True})]
@@ -554,6 +694,7 @@ class SyncthingApiControlTests(unittest.TestCase):
                 self.assertEqual(after["networkHandlers"], 0)
                 self.assertEqual(after["clickHandlers"], 0)
                 self.assertEqual(after["activeRequests"], 0)
+                self.assertEqual(after["activeProcesses"], 0)
                 self.assertEqual(after["destroyCount"], 1)
                 self.assertEqual(after["abortCount"], 1)
                 self.assertFalse(any(command.get("verb") == "stop" for command in after["commands"]))
@@ -690,6 +831,98 @@ class WebPageLoginTests(unittest.TestCase):
         self.assertFalse(result["clipboardHasPassword"])
         self.assertEqual(result["notifications"], [])
         self.assertFalse(result["secretLeaked"])
+
+    def test_sharing_settings_verifies_the_current_preserved_username_without_an_api_key_or_cookie(self):
+        result = run_scenario("sharingSettings", guiUser="preserved-owner")
+        self.assertTrue(result["clipboardHasPassword"])
+        self.assertEqual(result["clipboardWrites"], 1)
+        self.assertEqual(result["browserLaunches"], 1)
+        self.assertIn("preserved-owner", result["notifications"][0]["body"])
+        self.assertNotIn("testuser", result["notifications"][0]["body"])
+        login = [request for request in result["apiRequests"]
+                 if request["path"] == "noauth/auth/password"]
+        self.assertEqual(len(login), 1)
+        self.assertEqual(login[0]["method"], "POST")
+        self.assertEqual(login[0]["body"], {"username": "preserved-owner", "password": "<redacted>",
+                                            "stayLoggedIn": False})
+        self.assertFalse(login[0]["apiKeyPresent"])
+        self.assertFalse(login[0]["cookiePresent"])
+        self.assertTrue(login[0]["noRedirect"])
+        self.assertEqual(gui_changes(result), [])
+        self.assertFalse(result["secretLeaked"])
+
+    def test_sharing_settings_never_copies_an_independently_generated_password_for_custom_or_ldap_login(self):
+        for options in [{"guiUser": "owner", "guiPassword": "$2a$10$" + "u" * 53,
+                         "guiPlaintext": "user-chosen-password"},
+                        {"guiAuthMode": "ldap"}, {"guiUser": ""}, {"guiPassword": ""}]:
+            with self.subTest(options=options):
+                result = run_scenario("sharingSettings", **options)
+                self.assertEqual(result["launchedUrl"], "http://127.0.0.1:8384")
+                self.assertFalse(result["clipboardHasPassword"])
+                self.assertEqual(result["clipboardWrites"], 0)
+                self.assertEqual(result["notifications"], [])
+                self.assertEqual(gui_changes(result), [])
+                self.assertFalse(result["secretLeaked"])
+
+    def test_managed_password_remains_verifiable_after_reenable_and_changed_password_is_not_copied(self):
+        for reenable in [False, True]:
+            for changed in [False, True]:
+                with self.subTest(reenable=reenable, changed=changed):
+                    result = run_scenario("sharingSettingsAfterStart", guiUser="preserved-owner",
+                                          reenable=reenable, changedPassword=changed)
+                    self.assertEqual(result["clipboardHasPassword"], not changed)
+                    self.assertEqual(result["clipboardWrites"], 0 if changed else 1)
+                    self.assertEqual(len(result["notifications"]), 0 if changed else 1)
+                    self.assertEqual(result["launchedUrl"], "http://127.0.0.1:8384")
+                    self.assertEqual(len(gui_changes(result)), 1)
+                    self.assertFalse(result["secretLeaked"])
+
+    def test_unreachable_or_non_authentication_success_never_copies_a_password(self):
+        options = [{"unreachableAfterStatus": True}, {"loginApiError": {"transport": True}}]
+        options += [{"loginApiError": {"status": status, "raw": "private-test-gui-password"}}
+                    for status in [200, 201, 202, 302, 401, 403, 500]]
+        options += [{"apiErrors": {"config/gui": {"status": 200, "raw": "{}"}}}]
+        for scenario_options in options:
+            with self.subTest(options=scenario_options):
+                result = run_scenario("sharingSettings", **scenario_options)
+                self.assertEqual(result["launchedUrl"], "http://127.0.0.1:8384")
+                self.assertFalse(result["clipboardHasPassword"])
+                self.assertEqual(result["notifications"], [])
+                self.assertEqual(gui_changes(result), [])
+                self.assertFalse(result["secretLeaked"])
+
+    def test_disable_and_newer_intent_cancel_sharing_settings_without_opening_or_copying(self):
+        for gate in ["api:GET:config/gui", "api:POST:noauth/auth/password"]:
+            for interrupt in ["destroy", "off"]:
+                with self.subTest(gate=gate, interrupt=interrupt):
+                    result = run_scenario("sharingSettingsInterrupt", gate=gate, interrupt=interrupt)
+                    self.assertIsNone(result["launchedUrl"])
+                    self.assertEqual(result["clipboardWrites"], 0)
+                    self.assertFalse(any(notification["title"] == "Sync Folder Sharing Settings"
+                                         for notification in result["notifications"]))
+                    self.assertEqual(result["activeRequests"], 0)
+                    self.assertEqual(result["cancellationHandlers"], 0)
+                    self.assertEqual(result["timerCount"], 0 if interrupt == "destroy" else 1)
+                    self.assertFalse(result["secretLeaked"])
+
+    def test_only_the_newest_sharing_settings_click_can_copy_or_open(self):
+        result = run_scenario("sharingSettingsOverlapping")
+        self.assertTrue(result["clipboardHasPassword"])
+        self.assertEqual(result["clipboardWrites"], 1)
+        self.assertEqual(result["browserLaunches"], 1)
+        self.assertEqual(len(result["notifications"]), 1)
+        self.assertEqual(result["activeRequests"], 0)
+        self.assertEqual(result["cancellationHandlers"], 0)
+        self.assertFalse(result["secretLeaked"])
+
+    def test_sharing_settings_password_verification_has_a_deadline(self):
+        result = run_scenario("sharingSettingsInterrupt", interrupt="timeout")
+        self.assertEqual(result["launchedUrl"], "http://127.0.0.1:8384")
+        self.assertEqual(result["clipboardWrites"], 0)
+        self.assertEqual(result["notifications"], [])
+        self.assertEqual(result["activeRequests"], 0)
+        self.assertEqual(result["cancellationHandlers"], 0)
+        self.assertEqual(result["timerCount"], 1)
 
 
 @unittest.skipIf(NODE is None, "node is not installed")

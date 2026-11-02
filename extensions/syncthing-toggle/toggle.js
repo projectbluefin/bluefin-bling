@@ -19,6 +19,67 @@ const commandSeconds = 30
 const unitStartSeconds = 960
 const unitStopSeconds = 90
 
+// disable() cannot await rollback. Keep its completion outside the destroyed
+// indicator so a successor cannot inspect or start the same temporary unit.
+let nativeCleanupBarrier = Promise.resolve()
+
+async function runCommand(argv, parent, allowFailure, seconds) {
+	const cancellable = new Gio.Cancellable()
+	let timer = 0
+	let parentSignal = 0
+	let cancelSignal = 0
+	let proc = null
+	try {
+		parentSignal = parent.connect(() => cancellable.cancel())
+		timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, seconds * 1000, () => {
+			timer = 0
+			cancellable.cancel()
+			return GLib.SOURCE_REMOVE
+		})
+		if (cancellable.is_cancelled())
+			throw new Error('Operation cancelled')
+		proc = Gio.Subprocess.new(argv,
+			Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE)
+		cancelSignal = cancellable.connect(() => {
+			try { proc.force_exit() } catch {}
+		})
+		const stdout = await new Promise((resolve, reject) => {
+			proc.communicate_utf8_async(null, cancellable, (source, result) => {
+				try {
+					const [, output] = source.communicate_utf8_finish(result)
+					if (!allowFailure && !source.get_successful())
+						throw new Error('Command failed')
+					resolve(output)
+				} catch {
+					reject(new Error('Command failed'))
+				}
+			})
+		})
+		if (cancellable.is_cancelled())
+			throw new Error('Command cancelled')
+		return stdout
+	} catch {
+		throw new Error(_('The file sharing service command failed. Check the user service journal.'))
+	} finally {
+		// Cancelling communicate() abandons the read, not the child. This owner
+		// retains its deadline and reaps before releasing the completion barrier.
+		if (proc && cancellable.is_cancelled()) {
+			await new Promise(resolve => {
+				proc.wait_async(null, (source, result) => {
+					try { source.wait_finish(result) } catch {}
+					resolve()
+				})
+			})
+		}
+		if (cancelSignal)
+			cancellable.disconnect(cancelSignal)
+		if (parentSignal)
+			parent.disconnect(parentSignal)
+		if (timer)
+			GLib.Source.remove(timer)
+	}
+}
+
 function isObject(value) {
 	return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
@@ -80,6 +141,7 @@ export var ServiceIndicator = GObject.registerClass(
 			this._pollPromise = null
 			this._pollCancellable = null
 			this._pendingPromise = null
+			this._sharingSettingsCancellable = null
 			this._cancellables = new Set()
 			this._timeouts = new Set()
 			this._announcedPending = new Set()
@@ -172,53 +234,12 @@ export var ServiceIndicator = GObject.registerClass(
 			this._cancellables.delete(scope.cancellable)
 		}
 
-		async _exec(argv, cancellable, allowFailure = false, cleanup = false, seconds = commandSeconds) {
+		async _exec(argv, cancellable, allowFailure = false, seconds = commandSeconds) {
 			const generation = this._generation
-			if ((!cleanup && this._destroyed) || cancellable.is_cancelled())
-				throw new Error('Operation cancelled')
-			const scope = this._scope(cancellable, seconds * 1000)
-			let cancelSignal = 0
-			let proc = null
-			try {
-				proc = Gio.Subprocess.new(argv,
-					Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE)
-				cancelSignal = scope.cancellable.connect(() => {
-					try { proc.force_exit() } catch {}
-				})
-				const stdout = await new Promise((resolve, reject) => {
-					proc.communicate_utf8_async(null, scope.cancellable, (source, result) => {
-						try {
-							const [, output] = source.communicate_utf8_finish(result)
-							if (!allowFailure && !source.get_successful())
-								throw new Error('Command failed')
-							resolve(output)
-						} catch {
-							reject(new Error(_('The file sharing service command failed. Check the user service journal.')))
-						}
-					})
-				})
-				if (!cleanup)
-					this._assertCurrent(generation, cancellable)
-				if (scope.cancellable.is_cancelled())
-					throw new Error('Command cancelled')
-				return stdout
-			} catch {
-				throw new Error(_('The file sharing service command failed. Check the user service journal.'))
-			} finally {
-				// Cancellation abandons communicate(), not the child. Reap the
-				// killed helper before a newer request can write desktop metadata.
-				if (proc && scope.cancellable.is_cancelled()) {
-					await new Promise(resolve => {
-						proc.wait_async(null, (source, result) => {
-							try { source.wait_finish(result) } catch {}
-							resolve()
-						})
-					})
-				}
-				if (cancelSignal)
-					scope.cancellable.disconnect(cancelSignal)
-				this._releaseScope(scope)
-			}
+			this._assertCurrent(generation, cancellable)
+			const stdout = await runCommand(argv, cancellable, allowFailure, seconds)
+			this._assertCurrent(generation, cancellable)
+			return stdout
 		}
 
 		_runSystemctl(verb, serviceName, cancellable) {
@@ -228,7 +249,7 @@ export var ServiceIndicator = GObject.registerClass(
 				restart: unitStopSeconds + unitStartSeconds,
 			}[verb] ?? commandSeconds
 			return this._exec(['systemctl', '--user', verb, ...(serviceName ? [serviceName] : [])],
-				cancellable, false, false, seconds)
+				cancellable, false, seconds)
 		}
 
 		async _helper(action, serviceName, cancellable, enabled = undefined, waitForNative = false) {
@@ -239,16 +260,52 @@ export var ServiceIndicator = GObject.registerClass(
 			if (waitForNative)
 				request.waitForNative = true
 			const output = await this._exec(
-				['gjs', '-m', this._extensionPath + '/service.js', JSON.stringify(request)], cancellable)
+				['gjs', '-m', this._extensionPath + '/service.js', JSON.stringify(request)], cancellable, true)
 			this._assertCurrent(generation, cancellable)
 			let result
 			try { result = JSON.parse(output) } catch {}
-			if (!isObject(result) || !Array.isArray(result.folders) ||
+			let diagnostic
+			if (isObject(result) && Object.keys(result).length === 1) {
+				switch (result.error) {
+				case 'legacy-inspection-failed':
+					diagnostic = _('Unable to inspect existing file sharing. Check the user service journal and try again.')
+					break
+				case 'legacy-response-invalid':
+					diagnostic = _('Existing file sharing returned invalid folder settings. Check the user service journal.')
+					break
+				case 'legacy-folder-unavailable':
+					diagnostic = _('An existing shared folder is unavailable. Restore access to it and try again.')
+				}
+			}
+			if (diagnostic) {
+				const error = new Error(diagnostic)
+				error.userMessage = diagnostic
+				throw error
+			}
+			if (action === 'image' && isObject(result) && typeof result.image === 'string' &&
+				/^ghcr\.io\/syncthing\/syncthing:[^@\s]+@sha256:[a-f0-9]{64}$/.test(result.image))
+				return result
+			if (action === 'image' || !isObject(result) || !Array.isArray(result.folders) ||
 				typeof result.envFile !== 'string' || !result.envFile.startsWith('/') ||
 				typeof result.provisioned !== 'boolean' || typeof result.restartRequired !== 'boolean' ||
 				typeof result.nativeStartRequired !== 'boolean')
 				throw new Error(_('The file sharing container setup returned an invalid response.'))
 			return result
+		}
+
+		async _ensureImage(serviceName, cancellable) {
+			const { image } = await this._helper('image', serviceName, cancellable)
+			try {
+				// Own Podman directly: killing a synchronous helper would leave its
+				// long-running pull behind after disable() or a newer request.
+				await this._exec(['/usr/bin/podman', 'pull', '--policy=missing', '--quiet', image],
+					cancellable, false, unitStartSeconds)
+			} catch {
+				const message = _('Unable to download the file sharing image. Check your connection and try again.')
+				const error = new Error(message)
+				error.userMessage = message
+				throw error
+			}
 		}
 
 		async _loadCredentials(cancellable, envFile = undefined) {
@@ -301,18 +358,46 @@ export var ServiceIndicator = GObject.registerClass(
 			return true
 		}
 
-		_openSharingSettings() {
+		async _openSharingSettings() {
+			if (this._destroyed)
+				return
+			const generation = this._generation
+			this._sharingSettingsCancellable?.cancel()
+			const cancellable = this._newCancellable()
+			this._sharingSettingsCancellable = cancellable
 			const url = 'http://127.0.0.1:' + this._settings.get_int('port')
-			const password = this._credentials?.guiPassword
-			if (password) {
-				try {
-					St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, password)
-					Main.notify(_('Sync Folder Sharing Settings'),
-						_('Sign in with your login name. The password was copied to the clipboard.'))
-				} catch (error) {
-					logError(error, 'Failed to copy the sharing password')
+			try {
+				if (!this._credentials)
+					await this._loadCredentials(cancellable)
+				this._assertCurrent(generation, cancellable)
+				const password = this._credentials.guiPassword
+				if (password) {
+					const gui = await this._api('GET', 'config/gui', cancellable)
+					this._assertCurrent(generation, cancellable)
+					if (isObject(gui) && typeof gui.user === 'string' && gui.user &&
+						typeof gui.password === 'string' && gui.password &&
+						(gui.authMode === undefined || gui.authMode === 'static')) {
+						// REST Basic auth still needs CSRF validation. The daemon's
+						// password-login endpoint verifies credentials without a key or
+						// cookie; only its exact 204 response proves the current login.
+						await this._api('POST', 'noauth/auth/password', cancellable,
+							{ username: gui.user, password, stayLoggedIn: false }, true)
+						this._assertCurrent(generation, cancellable)
+						St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, password)
+						Main.notify(_('Sync Folder Sharing Settings'),
+							_('The password was copied to the clipboard. Username:') + ' ' + gui.user)
+					}
 				}
+			} catch {
+				// An existing/changed/directory login or unavailable daemon is not
+				// evidence that the independently stored password belongs to it.
+			} finally {
+				this._cancellables.delete(cancellable)
+				if (this._sharingSettingsCancellable === cancellable)
+					this._sharingSettingsCancellable = null
 			}
+			if (this._destroyed || generation !== this._generation || cancellable.is_cancelled())
+				return
 			try {
 				Gio.app_info_launch_default_for_uri(url, null)
 			} catch (error) {
@@ -320,7 +405,7 @@ export var ServiceIndicator = GObject.registerClass(
 			}
 		}
 
-		async _api(method, path, cancellable, body = undefined) {
+		async _api(method, path, cancellable, body = undefined, verifyLogin = false) {
 			const generation = this._generation
 			if (this._destroyed || cancellable.is_cancelled())
 				throw new Error('Operation cancelled')
@@ -328,14 +413,18 @@ export var ServiceIndicator = GObject.registerClass(
 				await this._loadCredentials(cancellable)
 			this._assertCurrent(generation, cancellable)
 			const message = Soup.Message.new(method, this._credentials.url + '/rest/' + path)
-			message.get_request_headers().append('X-API-Key', this._credentials.key)
+			const session = verifyLogin ? new Soup.Session({ proxy_resolver: null }) : this._session
+			if (verifyLogin)
+				message.set_flags(Soup.MessageFlags.NO_REDIRECT)
+			else
+				message.get_request_headers().append('X-API-Key', this._credentials.key)
 			if (body !== undefined)
 				message.set_request_body_from_bytes('application/json',
 					GLib.Bytes.new(new TextEncoder().encode(JSON.stringify(body))))
 			const scope = this._scope(cancellable, 2000)
 			try {
 				const bytes = await new Promise((resolve, reject) => {
-					this._session.send_and_read_async(message, GLib.PRIORITY_DEFAULT,
+					session.send_and_read_async(message, GLib.PRIORITY_DEFAULT,
 						scope.cancellable, (session, result) => {
 							try { resolve(session.send_and_read_finish(result)) } catch {
 								const error = new Error(_('Unable to reach the local file sharing API.'))
@@ -346,6 +435,11 @@ export var ServiceIndicator = GObject.registerClass(
 				})
 				this._assertCurrent(generation, cancellable)
 				const status = message.get_status()
+				if (verifyLogin) {
+					if (status !== 204)
+						throw new Error(_('Unable to verify the current file sharing password.'))
+					return true
+				}
 				if (status < 200 || status >= 300) {
 					const error = new Error(_('The local file sharing API refused the request.') + ` (HTTP ${status})`)
 					error.transient = status >= 500
@@ -359,6 +453,8 @@ export var ServiceIndicator = GObject.registerClass(
 				}
 			} finally {
 				this._releaseScope(scope)
+				if (verifyLogin)
+					session.abort()
 			}
 		}
 
@@ -387,6 +483,8 @@ export var ServiceIndicator = GObject.registerClass(
 
 		async _readServiceState(serviceName, cancellable) {
 			const generation = this._generation
+			await nativeCleanupBarrier
+			this._assertCurrent(generation, cancellable)
 			const output = await this._exec(['systemctl', '--user', 'is-active', serviceName], cancellable, true)
 			this._assertCurrent(generation, cancellable)
 			const state = output?.trim()
@@ -462,19 +560,6 @@ export var ServiceIndicator = GObject.registerClass(
 			}
 		}
 
-		async _stopOwnedNative(serviceName) {
-			// Teardown cancels request I/O, but must not leave its temporary native
-			// sharing process behind. This bounded rollback outlives that request;
-			// the transition queue waits for it before applying a newer intent.
-			const cancellable = this._newCancellable()
-			try {
-				await this._exec(['systemctl', '--user', 'stop', serviceName], cancellable, false, true,
-					unitStopSeconds)
-			} finally {
-				this._cancellables.delete(cancellable)
-			}
-		}
-
 		async _provision(prepared, status, generation, cancellable) {
 			if (prepared.provisioned)
 				return
@@ -527,6 +612,7 @@ export var ServiceIndicator = GObject.registerClass(
 			this._pendingRequest = request
 			this._operationCancellable?.cancel()
 			this._pollCancellable?.cancel()
+			this._sharingSettingsCancellable?.cancel()
 			if (!this._transition)
 				this._transition = this._drainTransitions()
 			return this._transition
@@ -564,6 +650,8 @@ export var ServiceIndicator = GObject.registerClass(
 				this._toggle.subtitle = active ? _('Starting') : _('Stopping')
 				if (active) {
 					previouslyRunning = await this._readUnitState(serviceName, cancellable)
+					this._assertCurrent(generation, cancellable)
+					await this._ensureImage(serviceName, cancellable)
 					this._assertCurrent(generation, cancellable)
 					let prepared = await this._helper('prepare', serviceName, cancellable)
 					this._assertCurrent(generation, cancellable)
@@ -633,7 +721,10 @@ export var ServiceIndicator = GObject.registerClass(
 			} catch (error) {
 				if (active && nativeStartAttempted && !initialized && !previouslyRunning) {
 					try {
-						await this._stopOwnedNative(serviceName)
+						// This command owns its cancellable/deadline independently of
+						// the dead indicator, whose destroy() publishes its completion.
+						await runCommand(['systemctl', '--user', 'stop', serviceName],
+							new Gio.Cancellable(), false, unitStopSeconds)
 					} catch (rollbackError) {
 						logError(rollbackError, 'Sync Folder')
 					}
@@ -668,7 +759,7 @@ export var ServiceIndicator = GObject.registerClass(
 				}
 				logError(error, 'Sync Folder')
 				Main.notify(_('Unable to Change File Sharing'),
-					_('Try again, or open Sharing Settings to review file sharing.'))
+					error.userMessage ?? _('Try again, or open Sharing Settings to review file sharing.'))
 			}
 		}
 
@@ -827,6 +918,8 @@ export var ServiceIndicator = GObject.registerClass(
 			this._destroyed = true
 			++this._generation
 			this._pendingRequest = null
+			if (this._transition)
+				nativeCleanupBarrier = Promise.allSettled([nativeCleanupBarrier, this._transition]).then(() => {})
 			for (const cancellable of this._cancellables)
 				cancellable.cancel()
 			this._cancellables.clear()

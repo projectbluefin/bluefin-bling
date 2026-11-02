@@ -157,6 +157,15 @@ function knownNativeUnit(serviceName, activeRequired = false) {
     return true;
 }
 
+function migrationError(code) {
+    const messages = {
+        'legacy-inspection-failed': 'Could not inspect legacy folders; retry file sharing setup',
+        'legacy-response-invalid': 'The legacy service returned an invalid folder response',
+        'legacy-folder-unavailable': 'A legacy folder is unavailable or unsafe',
+    };
+    return Object.assign(new Error(messages[code]), {migrationCode: code});
+}
+
 function legacyFolders(stateDir, image, gid, home, waitForNative = false) {
     const name = `syncthing-folder-inspection-${UID}-${GLib.uuid_string_random()}`;
     try {
@@ -164,7 +173,7 @@ function legacyFolders(stateDir, image, gid, home, waitForNative = false) {
         let output;
         try {
             output = command(['/usr/bin/timeout', '--kill-after=2', '20', '/usr/bin/podman',
-                'run', '--rm', '--name', name, '--timeout=20', '--network=host', '--userns=keep-id',
+                'run', '--pull=never', '--rm', '--name', name, '--timeout=20', '--network=host', '--userns=keep-id',
                 '--user', `${UID}:${gid}`, '--security-opt=label=disable', '--security-opt=no-new-privileges',
                 '--cap-drop=all', '--log-driver=none', '--env=HOME=/var/syncthing',
                 '--env=STHOMEDIR=/var/syncthing/config', '--env=STGUIADDRESS=', '--env=STGUIAPIKEY=',
@@ -178,25 +187,40 @@ function legacyFolders(stateDir, image, gid, home, waitForNative = false) {
             throw error;
         }
         // The root dump includes private GUI values; only folder paths leave this helper.
-        const configuration = JSON.parse(output);
+        let configuration;
+        try {
+            configuration = JSON.parse(output);
+        } catch (_) {
+            throw migrationError('legacy-response-invalid');
+        }
         const folders = configuration?.folders;
         if (!Array.isArray(folders) || folders.some(folder => !folder || typeof folder.path !== 'string'))
-            throw new Error('Invalid legacy folder response');
+            throw migrationError('legacy-response-invalid');
         const paths = [];
         for (const folder of folders) {
-            const path = absolutePath(folder.path);
-            const target = existingDirectory(path, home);
+            let path;
+            try {
+                path = absolutePath(folder.path);
+            } catch (_) {
+                throw migrationError('legacy-response-invalid');
+            }
+            let target;
+            try {
+                target = existingDirectory(path, home);
+            } catch (_) {
+                throw migrationError('legacy-folder-unavailable');
+            }
             if (target)
                 paths.push(target.path);
             else if (!file(path).query_exists(null) ||
                 file(path).query_file_type(Gio.FileQueryInfoFlags.NONE, null) !== Gio.FileType.DIRECTORY)
-                throw new Error('A legacy folder is unavailable');
+                throw migrationError('legacy-folder-unavailable');
             // Home/root and ancestors remain excluded by the mount safety policy.
         }
         return [...new Set(paths)];
-    } catch (_) {
+    } catch (error) {
         // Neither REST output nor daemon credentials may appear in helper errors.
-        throw new Error('Could not safely inspect legacy folders; leave the native service running and retry');
+        throw error.migrationCode ? error : migrationError('legacy-inspection-failed');
     } finally {
         command(['/usr/bin/timeout', '--kill-after=2', '5', '/usr/bin/podman',
             'rm', '--force', '--time=1', '--ignore', name], true);
@@ -287,7 +311,7 @@ function removeNativeAutostartLink(serviceName, nativeLink) {
 }
 
 function prepare(request) {
-    if (!['prepare', 'autostart', 'provisioned'].includes(request.action) ||
+    if (!['image', 'prepare', 'autostart', 'provisioned'].includes(request.action) ||
         !Number.isInteger(request.port) || request.port < 1 || request.port > 65535 ||
         typeof request.serviceName !== 'string' ||
         !/^[a-zA-Z0-9_][a-zA-Z0-9_.:@-]*\.service$/.test(request.serviceName))
@@ -298,6 +322,17 @@ function prepare(request) {
         throw new Error('extraPaths must be an absolute path array');
     if (request.waitForNative !== undefined && typeof request.waitForNative !== 'boolean')
         throw new Error('waitForNative requires a boolean value');
+
+    const templateFile = Gio.File.new_for_uri(import.meta.url).get_parent().get_child('syncthing.container.in');
+    const [ok, templateBytes] = templateFile.load_contents(null);
+    if (!ok)
+        throw new Error('Could not load container template');
+    let template = decoder.decode(templateBytes);
+    const image = template.match(/^Image=(\S+)$/m)?.[1];
+    if (!image)
+        throw new Error('Container template has no image');
+    if (request.action === 'image')
+        return {image};
 
     const stateDir = absolutePath(GLib.build_filenamev([GLib.get_user_state_dir(), 'syncthing']));
     const quadletDir = absolutePath(GLib.build_filenamev([GLib.get_user_config_dir(), 'containers', 'systemd']));
@@ -344,14 +379,6 @@ function prepare(request) {
     const gid = command(['/usr/bin/id', '-g']);
     if (!/^\d+$/.test(gid))
         throw new Error('Could not resolve current user group');
-    const templateFile = Gio.File.new_for_uri(import.meta.url).get_parent().get_child('syncthing.container.in');
-    const [ok, templateBytes] = templateFile.load_contents(null);
-    if (!ok)
-        throw new Error('Could not load container template');
-    let template = decoder.decode(templateBytes);
-    const image = template.match(/^Image=(\S+)$/m)?.[1];
-    if (!image)
-        throw new Error('Container template has no image');
     let legacyPaths = (metadata.legacyPaths ?? []).map(absolutePath);
     if (nativeActive) {
         const waitForNative = request.action === 'prepare' && request.waitForNative === true &&
@@ -391,7 +418,7 @@ function prepare(request) {
         const target = existingDirectory(path, home);
         if (!target) {
             if (legacyPaths.includes(path))
-                throw new Error('A captured legacy folder is unavailable or unsafe');
+                throw migrationError('legacy-folder-unavailable');
             continue;
         }
         // Preserve legacy config paths even when they are symlink aliases of an XDG directory.
@@ -437,6 +464,8 @@ try {
     print(JSON.stringify(prepare(JSON.parse(ARGV[0]))));
 } catch (error) {
     // Error details may contain parsed credentials; never echo the request, file contents or stack.
+    if (error.migrationCode)
+        print(JSON.stringify({error: error.migrationCode}));
     printerr(`Sync Folder deployment failed: ${error instanceof SyntaxError ? 'Invalid configuration JSON' : error.message}`);
     System.exit(1);
 }

@@ -84,13 +84,14 @@ Syncthing container. No separate panel icon or companion desktop app is needed.
 - **Supported configuration:** The extension uses authenticated asynchronous REST requests, not daemon XML rewrites or a host Syncthing binary.
 - **Preserved settings:** Native-service migration keeps identity, database, existing folders and peer approvals. Later toggles preserve user edits and deleted presets.
 - **Metered networks:** Sharing pauses without erasing the user's login startup choice; turning sharing on while metered is remembered across logouts and starts on the next unmetered connection; a newer off request prevents automatic resume.
-- **Protected web UI:** The built-in web page is locked with the login name and a private random password on every start, so other local accounts and sandboxed apps cannot reach it. Sharing Settings copies that password to the clipboard before opening the page; a login the user set themselves is kept.
+- **Protected web UI:** The built-in web page is locked with the login name and a private random password on every start. Sharing Settings copies that password only after verifying it against the current web login; existing user-defined and directory logins are preserved without copying unrelated credentials.
 - **Simple controls:** Sharing Settings opens the built-in web UI; Start/Stop only leaves login startup unchanged.
 
 #### Share a folder between two computers
 
 1. Turn on Sync Folder on both computers. On each one, open its menu and select
-   **Sharing Settings**. Sign in if asked; the menu copies the password for you.
+   **Sharing Settings**. Sign in if asked; the menu copies the managed password
+   only when it still matches. Use your existing login if you changed it.
 2. Pair the computers in Sharing Settings, approving the other computer on each
    side. Pairing alone does not share any folders.
 3. On the first computer, edit the folder you want to share, select the other
@@ -105,7 +106,7 @@ changed the same file differently, Syncthing keeps a conflict copy; see its
 Review the folder contents before sharing: later changes and deletions can sync
 to the other computer too.
 
-Requires `podman`, `gjs` with Soup 3, and the desktop's `xdg-user-dirs` configuration. The first on request prepares
+Requires `podman`, the standalone `gjs` helper, Shell-side Soup 3, and the desktop's `xdg-user-dirs` configuration. The first on request prepares
 the private configuration and user Quadlet. Install the whole extension directory,
 including its helper and container template. After replacing an already-loaded
 extension version on Wayland, save work and log out/in to load the new code.
