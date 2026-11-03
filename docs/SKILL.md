@@ -40,8 +40,8 @@ Agent entry point for `projectbluefin/bluefin-bling`. Load only the skill(s) tha
 ## Scope Rules
 
 - **Everything needs a PR — docs included.** `main` rejects direct pushes
-  (`Changes must be made through a pull request` / `through the merge queue`).
-  Branch, open a PR, get two write-permission approvals, let the queue merge it.
+  (`Changes must be made through a pull request`).
+  Branch, open a PR, verify CI passes, and squash merge.
   See [`skills/pr-review-and-merge.md`](skills/pr-review-and-merge.md).
 - **One PR per feature.** Never batch unrelated changes.
 
