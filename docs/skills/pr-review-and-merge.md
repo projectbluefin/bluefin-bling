@@ -31,20 +31,20 @@ metadata:
 
 ## What `main` actually requires
 
-Two active rulesets govern `main`: `main — review policy` (22705148) and
-`main — merge queue` (23208287). Derive them rather than trusting this list —
-see [Verification](#verification).
+The active ruleset governing `main` is `main — review policy` (22705148;
+`main — merge queue` 23208287 is disabled). Derive them rather than trusting
+this list — see [Verification](#verification).
 
 | Requirement | Value |
 |---|---|
-| Approving reviews | **1** |
+| Approving reviews | **0** (maintainers review and merge) |
 | Required status check | `validate extensions (tests, node --check, glib-compile-schemas)` |
 | Dismiss stale reviews on push | yes |
 | Require approval of most recent push | no |
 | Require extra approval for unattributed changes | yes |
 | Merge method | **squash** |
-| Direct push to `main` | **rejected, no exceptions** |
-| Merge queue | **active** (ruleset 23208287, squash merge) |
+| Direct push to `main` | **rejected, no exceptions** (PR required) |
+| Merge queue | **disabled** |
 
 There is no doc-only fast path. `AGENTS.md` and `docs/SKILL.md` both claimed one
 until 2026-09-18; the ruleset rejects every direct push:
@@ -55,17 +55,12 @@ remote: - Required status check "validate extensions (...)" is expected.
 remote: - Changes must be made through a pull request.
 ```
 
-### Merge queue configuration
+### Landing changes
 
-Ruleset `main — merge queue` (23208287) manages landing changes on `main` using
-squash merges. Because both rulesets enforce branch protection with
-`bypass_actors: []`, all PRs land via the merge queue once required status
-checks pass and approvals are met.
-
-When `gh pr merge <PR>` is run, GitHub adds the PR to the merge queue, which
-spawns a `merge_group` workflow run against a temporary merge group ref. Once
-`validate extensions` completes successfully, GitHub merges the PR automatically.
-
+Changes land via squash merge once required status checks pass. Ruleset 22705148
+enforces that all changes arrive via PR (`non_fast_forward` and `pull_request`
+enforced), while allowing repository admins to bypass when needed. Merge queue
+ruleset 23208287 is currently disabled.
 ## Only write-access approvals count
 
 This is the single most common source of confusion here.

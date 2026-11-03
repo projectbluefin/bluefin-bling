@@ -20,16 +20,14 @@ Parent factory: [projectbluefin/common](https://github.com/projectbluefin/common
 4. Validate changes before commit   # node --check, glib-compile-schemas, json validation
 ```
 
-**Everything goes through a PR, including doc-only changes.** There is no direct
-push to `main` — the ruleset rejects it:
+**Everything goes through a PR, including doc-only changes.** Direct push
+to `main` is blocked by the ruleset:
 ```
 remote: - Changes must be made through a pull request.
-remote: - Changes must be made through the merge queue.
 remote: - Required status check "validate extensions (...)" is expected.
 ```
-Branch, open a PR against `main`, get two write-permission approvals, and let the
-merge queue land it. See
-[`docs/skills/pr-review-and-merge.md`](docs/skills/pr-review-and-merge.md).
+Branch, open a PR against `main`, ensure required CI passes, and land via
+squash. See [`docs/skills/pr-review-and-merge.md`](docs/skills/pr-review-and-merge.md).
 
 ---
 
@@ -198,15 +196,12 @@ Types: `feat` `fix` `docs` `ci` `refactor` `chore` `build` `perf` `test`
 
 ### Review and Merge
 
-`main` requires **two approving reviews from accounts with write permission** plus
-the `validate extensions (tests, node --check, glib-compile-schemas)` check, and
-merges through a **merge queue** with squash. Approvals from read-only
-collaborators look identical in the UI and count for nothing, and the merge queue
-needs a `merge_group:` trigger in `ci.yml` or nothing can ever merge.
+`main` requires the `validate extensions (tests, node --check, glib-compile-schemas)`
+status check to pass, and lands via squash merge. Changes are submitted via PRs.
 
 Before approving or merging anything, read
-[`docs/skills/pr-review-and-merge.md`](docs/skills/pr-review-and-merge.md). 
-admin-merge past a review requirement can be done by a maintainer, this is not a strict image repo. 
+[`docs/skills/pr-review-and-merge.md`](docs/skills/pr-review-and-merge.md).
+Admin-merge past a review requirement can be done by a maintainer; this is not a strict image repo.
 
 ### AI Attribution
 
