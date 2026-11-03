@@ -31,6 +31,19 @@ function absolutePath(path) {
     return GLib.canonicalize_filename(path, null);
 }
 
+function resolveLegacyFolderPath(rawPath, home) {
+    if (typeof rawPath !== 'string' || !rawPath || /[\x00-\x1f\x7f:]/.test(rawPath))
+        throw new Error('Paths must be valid strings and contain no control characters or colons');
+    let path = rawPath;
+    if (path === '~')
+        path = home;
+    else if (path.startsWith('~/'))
+        path = GLib.build_filenamev([home, path.slice(2)]);
+    else if (!GLib.path_is_absolute(path))
+        path = GLib.build_filenamev([home, path]);
+    return absolutePath(path);
+}
+
 // Never follow a credential or configuration symlink, including its ancestors.
 function directory(path, privateMode = false) {
     const parent = GLib.path_get_dirname(path);
@@ -200,7 +213,7 @@ function legacyFolders(stateDir, image, gid, home, waitForNative = false) {
         for (const folder of folders) {
             let path;
             try {
-                path = absolutePath(folder.path);
+                path = resolveLegacyFolderPath(folder.path, home);
             } catch (_) {
                 throw migrationError('legacy-response-invalid');
             }
@@ -436,6 +449,8 @@ function prepare(request) {
         UID: String(UID), GID: gid,
         HOSTNAME: quote(GLib.get_host_name()),
         ENVFILE: quote(envFile),
+        HOME: quote(home),
+        WORKDIR: home.replaceAll('%', '%%'),
         // Volume is a raw colon-separated Quadlet value, NOT a shell argument.
         STATEVOLUME: `${stateDir.replaceAll('%', '%%')}:/var/syncthing/config:rw`,
         FOLDERVOLUMES: [...new Set(mounts.values())].map(path => `Volume=${path.replaceAll('%', '%%')}:${path.replaceAll('%', '%%')}:rw`).join('\n'),

@@ -198,7 +198,7 @@ class SyncthingServiceBehavior(unittest.TestCase):
             ({"raw_response": ""}, "legacy-response-invalid"),
             ({"raw_response": '{"password":"do-not-disclose",'}, "legacy-response-invalid"),
             ({"response": {"password": "do-not-disclose"}}, "legacy-response-invalid"),
-            ({"response": {"folders": [{"path": "relative-private-path"}]}}, "legacy-response-invalid"),
+            ({"response": {"folders": [{"path": "/bad:path"}]}}, "legacy-response-invalid"),
             ({"response": {"folders": [{"path": str(self.home / "missing-private-folder")}]}},
              "legacy-folder-unavailable"),
         ):
@@ -214,6 +214,24 @@ class SyncthingServiceBehavior(unittest.TestCase):
                 self.assertEqual([call[0] for call in calls], ["run", "rm"])
                 self.assertIn("--pull=never", calls[0])
                 self.assert_native_state_untouched(original, link)
+    def test_native_inspection_resolves_relative_and_tilde_folder_paths(self):
+        original, link = self.seed_native_state()
+        sync = self.home / "Sync"
+        tilde_sync = self.home / "TildeSync"
+        sync.mkdir()
+        tilde_sync.mkdir()
+        scenario = {"response": {"folders": [
+            {"path": "Sync"},
+            {"path": "~/TildeSync"},
+            {"path": "./Sync"},
+        ]}}
+        helper, _, events = self.seam_helper(scenario, native_active=True)
+        response = self.invoke(helper=helper, waitForNative=True)
+        self.assertFalse(response["nativeStartRequired"])
+        self.assertTrue(self.metadata()["legacyCaptured"])
+        self.assertEqual(set(self.metadata()["legacyPaths"]), {str(sync), str(tilde_sync)})
+        self.assertEqual((self.state_dir / "config.xml").read_bytes(), original)
+
 
     def test_native_readiness_retries_only_cli_not_ready_without_hidden_downloads(self):
         original, link = self.seed_native_state()
@@ -607,6 +625,9 @@ class SyncthingServiceBehavior(unittest.TestCase):
             self.assertEqual(option("--userns"), "keep-id")
             self.assertEqual(option("--user"), f"{os.getuid()}:{os.getgid()}")
             self.assertEqual(option("--env-file"), response["envFile"])
+            envs = dict(re.split("=", value, maxsplit=1) for value in options("-e", "--env"))
+            self.assertEqual(envs.get("HOME"), str(self.home))
+            self.assertEqual(next(options("-w", "--workdir")), str(self.home))
             volumes = list(options("-v", "--volume"))
             self.assertEqual(set(volumes), {
                 f"{self.state_dir}:/var/syncthing/config:rw",
