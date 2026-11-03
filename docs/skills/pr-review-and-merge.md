@@ -2,19 +2,18 @@
 name: pr-review-and-merge
 version: "1.1"
 last_updated: "2026-09-21"
-id: pr-review-and-merge
-one_line_purpose: Review, approve, and merge PRs under the main ruleset and merge queue.
+one_line_purpose: Review, approve, and merge PRs under the main ruleset.
 entry_point: docs/skills/pr-review-and-merge.md
 category: ci-ops
 mcp_compliance_level: partial
 optimization_status: draft
 status: active
 dependencies: []
-tags: [review, merge-queue, rulesets, governance, ci]
+tags: [review, rulesets, governance, ci]
 description: >-
   Documents how review approval and merging actually work in bluefin-bling: the
-  main ruleset, which approvals count, and the merge queue's merge_group
-  requirement. Use when reviewing, approving, or merging a PR, or when a green
+  main ruleset, status check requirements, and the merge queue trigger if
+  re-enabled. Use when reviewing, approving, or merging a PR, or when a green
   PR will not merge.
 metadata:
   type: runbook
@@ -26,7 +25,7 @@ metadata:
 
 - Reviewing, approving, or merging any PR in this repo.
 - A PR is green and approved but the merge button is unavailable.
-- A PR is sitting in the merge queue and nothing is happening.
+- A PR is approved or green but cannot be merged.
 - Counting approvals and getting a different answer than GitHub does.
 
 ## What `main` actually requires
@@ -59,8 +58,9 @@ remote: - Changes must be made through a pull request.
 
 Changes land via squash merge once required status checks pass. Ruleset 22705148
 enforces that all changes arrive via PR (`non_fast_forward` and `pull_request`
-enforced), while allowing repository admins to bypass when needed. Merge queue
+enforced), with administrator bypass enabled (`RepositoryRole: 5 / Admin`). Merge queue
 ruleset 23208287 is currently disabled.
+
 ## Only write-access approvals count
 
 This is the single most common source of confusion here.
@@ -86,17 +86,16 @@ Corollaries:
 - You cannot approve your own PR. An author needs a write-access reviewer other than themselves.
 - Multiple approvals from the same person count once.
 
-## The merge queue needs a `merge_group` trigger
+## The merge queue trigger (`merge_group`)
 
-`main` merges through a merge queue. The queue builds a **temporary
-`merge_group` ref** and waits for the required status check to report against
-*that ref* — not against the PR head.
+Ruleset `main — merge queue` (23208287) is currently disabled, but if re-enabled,
+the queue builds a **temporary `merge_group` ref** and waits for the required status
+check to report against *that ref* — not against the PR head.
 
-**A workflow without a `merge_group:` trigger can never satisfy it.** No run is
-started, the context never reports, and the entry sits in `AWAITING_CHECKS`
+A workflow without a `merge_group:` trigger can never satisfy it if the queue is enabled.
+No run is started, the context never reports, and the entry sits in `AWAITING_CHECKS`
 until `check_response_timeout_minutes` (90) expires and is dropped. Re-queueing
 repeats this forever.
-
 This is not hypothetical. The merge-queue ruleset was created
 2026-09-13T20:07Z; `ci.yml` had no `merge_group:` trigger; the last successful
 merge was #25 on 2026-09-12. **Nothing merged for six days** and eleven green,
@@ -152,7 +151,7 @@ Work down this list; stop at the first that explains it.
 3. `reviewDecision` — `REVIEW_REQUIRED` means not enough *counting* approvals;
    `CHANGES_REQUESTED` means a reviewer is blocking.
 4. Reviewer permissions — see above.
-5. Merge queue — if `isInMergeQueue` is true and state is `AWAITING_CHECKS`
+5. Merge queue (if enabled) — if `isInMergeQueue` is true and state is `AWAITING_CHECKS`
    with `estimatedTimeToMerge: null`, suspect the `merge_group` trigger.
 
 Dequeuing is safe: it does not change the head, dismiss approvals, mark the PR
@@ -188,7 +187,7 @@ gh api repos/$R/collaborators --jq '.[] | select(.permissions.push) | .login'
 # Real state of one PR: CI on the head SHA, deduped reviews, merge state
 gh pr view <N> --repo $R --json mergeStateStatus,reviewDecision,statusCheckRollup,reviews
 
-# Has the merge queue ever actually run? (0 means the merge_group trigger is missing)
+# Has the merge queue ever run? (if testing merge queue state)
 gh api "repos/$R/actions/runs?event=merge_group" --jq '.total_count'
 
 # Is the trigger present?
