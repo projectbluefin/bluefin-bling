@@ -23,6 +23,19 @@ const unitStopSeconds = 90
 // indicator so a successor cannot inspect or start the same temporary unit.
 let nativeCleanupBarrier = Promise.resolve()
 
+function normalizeFolderPath(path) {
+	if (typeof path !== 'string' || !path)
+		return path
+	const home = GLib.get_home_dir()
+	if (path === '~')
+		return GLib.canonicalize_filename(home, null)
+	if (path.startsWith('~/'))
+		return GLib.canonicalize_filename(GLib.build_filenamev([home, path.slice(2)]), null)
+	if (!GLib.path_is_absolute(path))
+		return GLib.canonicalize_filename(GLib.build_filenamev([home, path]), null)
+	return GLib.canonicalize_filename(path, null)
+}
+
 async function runCommand(argv, parent, allowFailure, seconds) {
 	const cancellable = new Gio.Cancellable()
 	let timer = 0
@@ -576,7 +589,7 @@ export var ServiceIndicator = GObject.registerClass(
 					throw new Error(_('The file sharing container setup returned invalid folder settings.'))
 				// Preserve folders already configured at this path, even under a
 				// different ID. Never rewrite labels, sharing consent or paused state.
-				if (existing.some(item => item.id === folder.id || item.path === folder.path))
+				if (existing.some(item => item.id === folder.id || normalizeFolderPath(item.path) === folder.path))
 					continue
 				const configured = {
 					...defaults,

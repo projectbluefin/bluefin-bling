@@ -92,6 +92,24 @@ class SyncthingApiControlTests(unittest.TestCase):
         self.assertTrue(result["notifications"][0]["active"])
         self.assertFalse(result["secretLeaked"])
 
+    def test_legacy_first_use_preserves_relative_and_tilde_folder_paths_without_duplication(self):
+        existing = [
+            {"id": "docs", "path": "~/Documentos", "label": "Tilde Docs",
+             "paused": True, "devices": [{"deviceID": "PEER-1"}]},
+            {"id": "sync", "path": "Sync", "label": "Relative Sync",
+             "paused": False, "devices": [{"deviceID": "PEER-2"}]},
+        ]
+        migration = run_scenario("firstUse", legacy=True, existingFolders=existing)
+        result = migration["after"]
+        self.assertTrue(result["running"])
+        self.assertTrue(result["provisioned"])
+        actual = {folder["id"]: folder for folder in result["configured"]}
+        for folder in existing:
+            self.assertEqual(actual[folder["id"]], folder)
+        # Documents preset was already matched against ~/Documentos, so only music & pictures are posted
+        posted = posted_folders(result)
+        self.assertEqual([f["id"] for f in posted], ["music", "pictures"])
+
     def test_stopped_native_upgrade_preserves_custom_folders_identity_and_sharing_consent(self):
         existing = [
             {"id": "team-projects", "path": "/srv/Shared projects", "label": "Approved work",

@@ -10,7 +10,8 @@ UserNS=keep-id
 User=@UID@
 Group=@GID@
 EnvironmentFile=@ENVFILE@
-Environment=HOME=/var/syncthing
+Environment=HOME=@HOME@
+WorkingDir=@WORKDIR@
 Environment=STHOMEDIR=/var/syncthing/config
 Environment=STNOUPGRADE=1
 Environment=UMASK=0077
