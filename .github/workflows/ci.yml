@@ -8,11 +8,9 @@ on:
   push:
     branches: [main]
   pull_request:
-  # The `main` ruleset runs a merge queue. The queue builds a temporary
+  # Kept for when merge queue is active. When enabled, the queue builds a temporary
   # `merge_group` ref and waits for the required `validate extensions` context
-  # to report against it. Without this trigger no run is ever started, the
-  # context never reports, and every queued PR sits in AWAITING_CHECKS until
-  # check_response_timeout_minutes expires and the entry is dropped.
+  # to report against it.
   merge_group:
     types: [checks_requested]
   workflow_dispatch:

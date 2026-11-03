@@ -87,7 +87,7 @@ been caught by a verification command.
 | **bootc Permission Model** | "`bootc status` calls `prepare_for_write()` requiring root privileges; unprivileged processes should handle exit codes gracefully without permanently disabling retries." |
 | **GNOME Shell Quick Settings** | "`ShutdownItem` inside `SystemItem` can be accessed via `qs._system._systemItem.menu.sourceActor`." |
 | **HIG Copy Conventions** | "Use plain conversational language for notifications: 'Sync Folder Sharing Enabled — Your files are sharing with your other devices.' Avoid technical jargon like 'peer-to-peer'." |
-| **Repo mechanics** | "Approvals count only from reviewers with write permission; a merge queue needs a `merge_group:` trigger or nothing can ever merge." → [`pr-review-and-merge.md`](./pr-review-and-merge.md) |
+| **Repo mechanics** | "Approvals count only from reviewers with write permission; merge queue requires a `merge_group:` trigger in `ci.yml`." → [`pr-review-and-merge.md`](./pr-review-and-merge.md) |
 
 ## What Does NOT Belong
 
