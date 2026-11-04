@@ -253,9 +253,10 @@ class SyncthingServiceBehavior(unittest.TestCase):
         self.assertFalse(response["nativeStartRequired"])
         self.assertTrue(self.metadata()["legacyCaptured"])
         self.assertEqual(self.metadata()["legacyPaths"], [str(sync)])
-        volumes = [line.removeprefix("Volume=").split(":")[0]
+        volumes = [line.removeprefix("Volume=").split(":")[0].replace("%%", "%")
                    for line in self.quadlet.read_text().splitlines() if line.startswith("Volume=")]
         self.assertIn(str(sync), volumes)
+        self.assertIn(str(self.state_dir), volumes)
         for volume in volumes:
             if volume == str(self.state_dir):
                 continue
