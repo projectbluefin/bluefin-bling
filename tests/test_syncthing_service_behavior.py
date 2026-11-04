@@ -232,6 +232,38 @@ class SyncthingServiceBehavior(unittest.TestCase):
         self.assertEqual(set(self.metadata()["legacyPaths"]), {str(sync), str(tilde_sync)})
         self.assertEqual((self.state_dir / "config.xml").read_bytes(), original)
 
+    def test_native_inspection_never_mounts_home_or_ancestors_from_relative_paths(self):
+        # Relative and tilde forms must not reach home, its ancestors, or root.
+        original, link = self.seed_native_state()
+        sync = self.home / "Sync"
+        sync.mkdir()
+        scenario = {"response": {"folders": [
+            {"path": "~"},
+            {"path": "~/"},
+            {"path": "."},
+            {"path": ".."},
+            {"path": "Sync/.."},
+            {"path": "~/../.."},
+            {"path": str(self.home)},
+            {"path": "/"},
+            {"path": "~/Sync"},
+        ]}}
+        helper, _, _ = self.seam_helper(scenario, native_active=True)
+        response = self.invoke(helper=helper, waitForNative=True)
+        self.assertFalse(response["nativeStartRequired"])
+        self.assertTrue(self.metadata()["legacyCaptured"])
+        self.assertEqual(self.metadata()["legacyPaths"], [str(sync)])
+        volumes = [line.removeprefix("Volume=").split(":")[0]
+                   for line in self.quadlet.read_text().splitlines() if line.startswith("Volume=")]
+        self.assertIn(str(sync), volumes)
+        for volume in volumes:
+            if volume == str(self.state_dir):
+                continue
+            resolved = Path(volume).resolve()
+            self.assertNotEqual(resolved, self.home.resolve())
+            self.assertNotIn(resolved, self.home.resolve().parents)
+        self.assertEqual((self.state_dir / "config.xml").read_bytes(), original)
+
 
     def test_native_readiness_retries_only_cli_not_ready_without_hidden_downloads(self):
         original, link = self.seed_native_state()
