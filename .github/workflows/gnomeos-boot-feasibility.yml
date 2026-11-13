@@ -34,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.resolve-channels.outputs.matrix) }}
-    uses: projectbluefin/testsuite/.github/workflows/e2e.yml@fca0aa42f6f64aaa92ab1120be4f9356487db5d2 # v1
+    uses: projectbluefin/testsuite/.github/workflows/e2e.yml@d071de95a9c891064b91d4d0405eeee539abd328 # v1
     with:
       image: ${{ matrix.image_digest }}
       suites: vanilla-gnome
