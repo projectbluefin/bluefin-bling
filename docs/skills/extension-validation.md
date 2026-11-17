@@ -246,6 +246,12 @@ Soup, subprocesses and files; they do not prove a real container or peer sync.
 `apiErrors` bodies that parse as JSON but are not invitation objects, so the
 shape checks in `_readPending()` fail closed without announcing anything.
 
+`tests/test_syncthing_sharing_behavior.py` also covers menu/poll races. Pair
+superseded-read cancellation checks with a current-read failure and recovery
+check: ignoring an obsolete error must not hide a genuine outage. Check item
+identity during background polls, then change the fixture and reopen the menu
+to prove that preserving expanded items does not prevent fresh reads.
+
 Two rules keep these honest:
 
 - **One harness per module.** A second harness over the same source splits the
