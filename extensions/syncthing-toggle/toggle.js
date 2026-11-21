@@ -183,9 +183,10 @@ export var ServiceIndicator = GObject.registerClass(
 			})
 			this._sessionSignalId = Main.sessionMode.connect('updated', () => {
 				++this._sharingEpoch
-				// Do not cancel an in-flight changeSharing() write: a lock/shutdown/session
-				// switch must still let the ignore entry reach Syncthing. Only clear the UI
-				// and stop showing peer names; the write finishes on its own.
+				// Invalidate reads only: bump the read epoch and cancel the pending
+				// read scope. An in-flight _sharingWriteApi is not cancelled by a
+				// lock/shutdown/session switch, so the ignore entry still reaches
+				// Syncthing. Only clear the UI and peer names; the write finishes.
 				this._pendingScope?.cancellable.cancel()
 				this._toggle.sharingSection.removeAll()
 				this._toggle.sharingSection.actor.visible = this._sharingAllowed()
@@ -936,6 +937,17 @@ export var ServiceIndicator = GObject.registerClass(
 			}
 		}
 
+		// A change the user already started must finish its writes after a lock;
+		// only disable/stop (generation, cancellable) may abort it.
+		_sharingWriteApi(generation, cancellable) {
+			return async (method, path, body) => {
+				this._assertCurrent(generation, cancellable)
+				const result = await this._api(method, path, cancellable, body)
+				this._assertCurrent(generation, cancellable)
+				return result
+			}
+		}
+
 		_checkPendingInvitations(generation, cancellable) {
 			if (!this._sharingAllowed() || this._sharingBusy)
 				return Promise.resolve()
@@ -1063,7 +1075,7 @@ export var ServiceIndicator = GObject.registerClass(
 			const epoch = this._sharingEpoch
 			const generation = this._generation
 			try {
-				await changeSharing(this._sharingApi(generation, scope.cancellable, epoch),
+				await changeSharing(this._sharingWriteApi(generation, scope.cancellable),
 					folderId, deviceId, share)
 			} catch (error) {
 				if (this._sharingAllowed() && epoch === this._sharingEpoch)
