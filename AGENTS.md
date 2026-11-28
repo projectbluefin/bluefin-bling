@@ -55,6 +55,10 @@ bluefin-bling/
 │       ├── prefs.js
 │       ├── icons/
 │       └── schemas/
+├── compass-extensions/       # Compass launcher extensions (TypeScript, @vicinae/api)
+│   ├── container-terminal/   # Open a container in Ghostty or a chosen terminal
+│   ├── brew-search/          # Search and install Homebrew packages
+│   └── ai-command/           # /ai prompt with selectable model and source
 ├── docs/
 │   ├── SKILL.md               # Task → skill router
 │   └── skills/                # Authoritative operational knowledge
@@ -71,7 +75,7 @@ bluefin-bling/
 └── .gitignore
 ```
 
-**Rule:** Every extension lives under its own folder inside `extensions/` with its own `metadata.json`. Monorepo root is reserved for docs, CI, and tooling.
+**Rule:** Every GNOME Shell extension lives under its own folder inside `extensions/` with its own `metadata.json`. Compass launcher extensions (TypeScript, `@vicinae/api`) live under `compass-extensions/` with their own `package.json`; they are not GNOME Shell extensions and are validated by a separate suite. Monorepo root is reserved for docs, CI, and tooling.
 
 ---
 

@@ -7,3 +7,7 @@
 __pycache__/
 *.py[cod]
 gschemas.compiled
+node_modules/
+dist/
+*.tsbuildinfo
+vicinae-env.d.ts

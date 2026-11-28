@@ -33,6 +33,10 @@ bluefin-bling/
 │       ├── prefs.js
 │       ├── icons/
 │       └── schemas/
+├── compass-extensions/       # Compass launcher extensions (TypeScript, @vicinae/api)
+│   ├── container-terminal/   # Open a container in Ghostty or a chosen terminal
+│   ├── brew-search/          # Search and install Homebrew packages
+│   └── ai-command/           # /ai prompt with selectable model and source
 ├── docs/
 │   ├── SKILL.md               # Task → skill router
 │   └── skills/                # Authoritative operational knowledge
@@ -152,6 +156,29 @@ repainting the Shell from the extension:
 
 ---
 
+## Compass launcher extensions
+
+The [`compass-extensions/`](compass-extensions/README.md) directory holds
+TypeScript extensions for [Compass](https://github.com/tuna-os/compass), the
+launcher Bluefin is adopting. They are not GNOME Shell extensions and are not
+loaded by `gnome-extensions`; they are built with the `@vicinae/api` SDK and run
+inside Compass's extension worker.
+
+- **`container-terminal`** — search Podman, Docker, and Distrobox containers and
+  open the selected one in Ghostty or a terminal chosen in the extension
+  preferences.
+- **`brew-search`** — search Linuxbrew formulae and casks on an atomic host and
+  install the selection with `brew install` in a terminal.
+- **`ai-command`** — an `/ai`-style prompt command with arguments for the model
+  and the source/provider (OpenAI, OpenRouter, Anthropic, Ollama, or a hearth
+  route exposing an OpenAI-compatible endpoint).
+
+Build and hot-reload one with `npm install && npm run dev` from its folder.
+See [`docs/skills/compass-extension-dev.md`](docs/skills/compass-extension-dev.md)
+for the API constraints and the validation contract.
+
+---
+
 ## Installation & Development
 
 ### Local Installation
@@ -245,6 +272,7 @@ This repository follows standard Project Bluefin practices:
 - **Authoritative Agent Instructions:** [`AGENTS.md`](AGENTS.md)
 - **Skill Router:** [`docs/SKILL.md`](docs/SKILL.md)
 - **Skills Catalog:** [`docs/skills/`](docs/skills/)
+  - [`compass-extension-dev.md`](docs/skills/compass-extension-dev.md)
   - [`extension-validation.md`](docs/skills/extension-validation.md)
   - [`factory-onboarding.md`](docs/skills/factory-onboarding.md)
   - [`gnome-shell-extension-dev.md`](docs/skills/gnome-shell-extension-dev.md)

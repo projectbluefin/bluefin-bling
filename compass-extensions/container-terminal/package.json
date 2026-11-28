@@ -1,0 +1,111 @@
+{
+  "$schema": "https://raw.githubusercontent.com/vicinaehq/vicinae/refs/heads/main/extra/schemas/extension.json",
+  "name": "container-terminal",
+  "title": "Container Terminal",
+  "description": "Search Podman, Docker and Distrobox containers and open the selected one in Ghostty or another terminal.",
+  "categories": ["Developer Tools", "Productivity"],
+  "license": "MIT",
+  "author": "HuntedRaven7",
+  "owner": "HuntedRaven7",
+  "icon": "icon.png",
+  "platforms": ["Linux"],
+  "keywords": ["podman", "docker", "distrobox", "containers", "terminal"],
+  "commands": [
+    {
+      "name": "containers",
+      "title": "Open Container in Terminal",
+      "description": "Search containers from every enabled runtime and open a shell in the selected one.",
+      "mode": "view",
+      "keywords": ["container", "podman", "docker", "distrobox", "shell", "ghostty"]
+    }
+  ],
+  "preferences": [
+    {
+      "name": "enablePodman",
+      "type": "checkbox",
+      "title": "Container runtimes",
+      "label": "Podman",
+      "description": "Include containers managed by Podman in the search results.",
+      "required": false,
+      "default": true
+    },
+    {
+      "name": "enableDocker",
+      "type": "checkbox",
+      "title": "",
+      "label": "Docker",
+      "description": "Include containers managed by Docker in the search results.",
+      "required": false,
+      "default": true
+    },
+    {
+      "name": "enableDistrobox",
+      "type": "checkbox",
+      "title": "",
+      "label": "Distrobox",
+      "description": "Include Distrobox containers in the search results.",
+      "required": false,
+      "default": true
+    },
+    {
+      "name": "includeStopped",
+      "type": "checkbox",
+      "title": "Containers",
+      "label": "Include stopped containers",
+      "description": "Show stopped containers too. A stopped container is started before its shell opens.",
+      "required": false,
+      "default": false
+    },
+    {
+      "name": "terminal",
+      "type": "dropdown",
+      "title": "Terminal emulator",
+      "description": "The terminal used to open the container shell. {command} is replaced with the shell command.",
+      "required": false,
+      "default": "ghostty -e {command}",
+      "data": [
+        { "title": "Ghostty", "value": "ghostty -e {command}" },
+        { "title": "GNOME Terminal", "value": "gnome-terminal -- {command}" },
+        { "title": "Konsole", "value": "konsole -e {command}" },
+        { "title": "Kitty", "value": "kitty {command}" },
+        { "title": "Alacritty", "value": "alacritty -e {command}" },
+        { "title": "WezTerm", "value": "wezterm start -- {command}" },
+        { "title": "xterm", "value": "xterm -e {command}" },
+        { "title": "Custom command", "value": "custom" }
+      ]
+    },
+    {
+      "name": "customTerminalTemplate",
+      "type": "textfield",
+      "title": "Custom terminal command",
+      "description": "Used when the terminal emulator is set to Custom command. Include {command} where the shell command belongs.",
+      "required": false,
+      "default": "ghostty -e {command}",
+      "placeholder": "ghostty -e {command}"
+    },
+    {
+      "name": "containerShell",
+      "type": "textfield",
+      "title": "Shell inside containers",
+      "description": "The shell started inside Podman and Docker containers. Distrobox uses its own entry command.",
+      "required": false,
+      "default": "/bin/sh",
+      "placeholder": "/bin/sh"
+    }
+  ],
+  "scripts": {
+    "build": "vici build",
+    "dev": "vici develop",
+    "format": "biome format --write src",
+    "lint": "vici lint"
+  },
+  "dependencies": {
+    "@vicinae/api": "^0.30.1"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.2",
+    "@types/node": "^24.9.2",
+    "@types/react": "^19.2.17",
+    "typescript": "^5.9.2"
+  }
+}

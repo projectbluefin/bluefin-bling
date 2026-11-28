@@ -19,6 +19,7 @@ Agent entry point for `projectbluefin/bluefin-bling`. Load only the skill(s) tha
 | Understand the operating contract, PR rules, or factory model | [`AGENTS.md`](../AGENTS.md) |
 | Check onboarding rules or factory alignment with `projectbluefin/common` | [`skills/factory-onboarding.md`](skills/factory-onboarding.md) |
 | **Extension development** | |
+| Build or modify a Compass launcher extension (`compass-extensions/`, `@vicinae/api`) | [`skills/compass-extension-dev.md`](skills/compass-extension-dev.md) |
 | Build or modify a GNOME Shell extension (GNOME 45+ ESM, lifecycle, cleanup) | [`skills/gnome-shell-extension-dev.md`](skills/gnome-shell-extension-dev.md) |
 | Work with Quick Settings toggles, indicators, or desktop notifications | [`skills/quick-settings-integration.md`](skills/quick-settings-integration.md) |
 | Inspect or integrate with pure `bootc` image status or system updates | [`skills/gnome-shell-extension-dev.md`](skills/gnome-shell-extension-dev.md) |
